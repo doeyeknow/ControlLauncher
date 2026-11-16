@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device-admin policies for Control: deliberately narrow. Force-lock
+     backs the LOCK text command and the in-app Lock button; wipe-data
+     backs only the two-step WIPE DEVICE text command. Nothing else is
+     requested — no password rules, no camera/storage control. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <wipe-data />
+    </uses-policies>
+</device-admin>

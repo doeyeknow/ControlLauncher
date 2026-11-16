@@ -1,0 +1,13 @@
+# Signing key + credentials: NEVER committed. Updates must be signed with
+# the same release key, which lives outside this repo.
+*.keystore
+keystore-credentials.txt
+# Build outputs
+*.apk
+build/
+# Local toolchain / editor state
+*.iml
+.DS_Store
+# Compiled harness output
+*.class
+harness/classes/

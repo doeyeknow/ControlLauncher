@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/textDim</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+
+    <!-- Light theme (v1.15): same structure, light grounds.
+         ThemedActivity picks this style when the light theme is
+         stored, so the window background and system bars match
+         the light token set. -->
+    <style name="AppTheme.Light" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bgLight</item>
+        <item name="android:statusBarColor">@color/bgLight</item>
+        <item name="android:navigationBarColor">@color/bgLight</item>
+        <item name="android:colorAccent">@color/accentLight</item>
+        <item name="android:textColorPrimary">@color/textLight</item>
+        <item name="android:textColorSecondary">@color/textDimLight</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+
+    <style name="QuietButton" parent="android:Widget.Material.Button">
+        <item name="android:backgroundTint">@color/surface2</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">52dp</item>
+    </style>
+
+    <style name="AccentButton" parent="android:Widget.Material.Button">
+        <item name="android:backgroundTint">@color/accent</item>
+        <item name="android:textColor">@color/accentDark</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">52dp</item>
+    </style>
+
+    <style name="SectionTitle">
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.12</item>
+        <item name="android:paddingTop">22dp</item>
+        <item name="android:paddingBottom">6dp</item>
+    </style>
+
+    <style name="BodyText">
+        <item name="android:textColor">@color/textDim</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:lineSpacingMultiplier">1.25</item>
+    </style>
+</resources>

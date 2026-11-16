@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="app.control.launcher">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Browser / profile transfer -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.NFC" />
+
+    <!-- Walkie-talkie -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+
+    <!-- SMS remote control (sideloaded app; Play policy is not the distribution route) -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+
+    <!-- Connections screen: cellular network type / signal / roaming
+         read-outs (runtime-requested; the screen degrades honestly
+         without it) -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <!-- Overlay ring (v1.14): the hold-anywhere menu is a
+         special-use foreground service (its watch needs a
+         persistent notification); it draws over other apps only
+         with the user's overlay grant. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Wallet (v1.7): the credential gate before a full card number
+         is shown. Normal-level; no runtime request. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- Bridge auto-restart watchdog (v1.16): start the watch
+         after a reboot so the bridge comes back by itself.
+         Normal-level; no runtime request. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Control"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="false">
+
+        <!-- Launcher home -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".DrawerActivity" android:exported="false" />
+        <activity android:name=".SettingsActivity" android:exported="false" />
+        <activity android:name=".BackgroundActivity" android:exported="false" />
+        <activity android:name=".SettingsFilterActivity" android:exported="false" />
+        <activity android:name=".SettingsSmsActivity" android:exported="false" />
+        <activity android:name=".SettingsAdminActivity" android:exported="false" />
+        <activity android:name=".SettingsProfileActivity" android:exported="false" />
+        <activity android:name=".SettingsAboutActivity" android:exported="false" />
+        <activity android:name=".AppPickerActivity" android:exported="false" />
+        <activity android:name=".HeldActivity" android:exported="false" />
+        <activity android:name=".ControlRoomActivity" android:exported="false" />
+        <activity android:name=".ConnectionsActivity" android:exported="false" />
+        <activity android:name=".AudioKeyPlayActivity" android:exported="false" />
+        <activity android:name=".AudioKeyListenActivity" android:exported="false" />
+        <activity android:name=".DeepViewActivity" android:exported="false" />
+        <activity android:name=".DeepControlActivity" android:exported="false" />
+        <activity android:name=".TerminalActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".WalletActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".LockActivity" android:exported="false"
+            android:excludeFromRecents="true" />
+        <activity android:name=".SmsLogActivity" android:exported="false" />
+
+        <!-- Built-in browser; also registers for web links. -->
+        <activity
+            android:name=".BrowserActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".BookmarksActivity" android:exported="false" />
+
+        <!-- Relay chat (was Matrix pre-v1.3) -->
+        <activity android:name=".ChatActivity" android:exported="false" />
+        <activity android:name=".RoomActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Portable profile and contacts -->
+        <!-- First-run setup (v1.15): name, permissions, import, theme -->
+        <activity android:name=".SetupActivity" android:exported="false" />
+        <activity android:name=".TransferActivity" android:exported="false" />
+        <activity android:name=".ImportActivity" android:exported="false" />
+        <activity android:name=".ScanActivity" android:exported="false" />
+        <activity android:name=".ContactsActivity" android:exported="false" />
+        <activity android:name=".ContactEditActivity" android:exported="false" />
+        <activity android:name=".VoiceProfileActivity" android:exported="false" />
+
+        <!-- Walkie-talkie -->
+        <activity android:name=".WalkieActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".ChannelsActivity" android:exported="false" />
+        <activity android:name=".ChannelEditActivity" android:exported="false" />
+
+        <!-- SMS remote-control receiver. The BROADCAST_SMS permission
+             prevents other apps from spoofing this protected broadcast. -->
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="100">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Package changes (v1.9): keep the cached app list fresh.
+             Not exported: only the system sends these broadcasts. -->
+        <receiver
+            android:name=".PackageChangeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_REMOVED" />
+                <action android:name="android.intent.action.PACKAGE_CHANGED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Bridge auto-restart watchdog (v1.16): after a reboot
+             the bridge is always down, so this starts the watch,
+             which restarts the bridge by itself while wireless
+             debugging stays on. Exported: BOOT_COMPLETED comes
+             from the system. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Device admin (v1.1): force-lock + wipe-data policies only.
+             Backs the SMS LOCK / WIPE DEVICE commands and the in-app
+             Lock button. BIND_DEVICE_ADMIN keeps anything else from
+             driving this receiver. -->
+        <receiver
+            android:name=".AdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Local VPN DNS filter -->
+        <service
+            android:name=".DnsVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+        </service>
+
+        <!-- Mesh internet: NAT VPN (offline phone side) -->
+        <service
+            android:name=".NatVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <!-- Mesh internet: gateway discovery + relay coordinator -->
+        <service
+            android:name=".MeshInternetService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="mesh-internet" />
+        </service>
+
+        <!-- Hold-anywhere overlay menu (v1.14): watches the
+             bridge's hold stream and hosts the ring over other
+             apps. Special-use foreground service, like the mesh
+             coordinator. -->
+        <service
+            android:name=".OverlayRingService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="overlay-ring" />
+        </service>
+
+        <!-- Bridge auto-restart watchdog (v1.16): pings the
+             bridge every few minutes and restarts it when it
+             dies or goes stale. Special-use foreground service,
+             like the overlay ring. -->
+        <service
+            android:name=".BridgeWatchdogService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="bridge-watchdog" />
+        </service>
+
+        <!-- Channel subscriptions (v1.19): polls subscribed
+             walkie channels over the internet relay in the
+             background. Special-use foreground service, like
+             the watchdog; the existing FOREGROUND_SERVICE_
+             SPECIAL_USE permission covers it — no new
+             permission. -->
+        <service
+            android:name=".SubscriptionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="channel-subscriptions" />
+        </service>
+
+        <!-- Notification control + Activity timeline -->
+        <service
+            android:name=".NotificationHoldService"
+            android:label="Control notification holder"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+    </application>
+</manifest>
