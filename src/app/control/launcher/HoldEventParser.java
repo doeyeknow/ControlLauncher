@@ -25,6 +25,19 @@ import java.util.regex.Pattern;
  * are ignored — many touchscreens mirror both, and the MT
  * stream is the authoritative one.
  *
+ * The threshold is judged two ways (v1.43): at every frame
+ * boundary, AND by {@link #evaluateAt} from the bridge's
+ * 100ms timer thread. The frame-only judgment was the overlay
+ * ring's defect: hardware that reports only on change sends
+ * no frames for a perfectly still finger, so the anchor was
+ * set at the down frame, no later frame ever arrived, and the
+ * lift cleared the state — the hold could never fire, and the
+ * ring never opened over other apps. The timer re-judges from
+ * the same CLOCK_MONOTONIC domain the getevent timestamps
+ * live in, and the fired flag keeps both paths to exactly one
+ * fire per touch. All entry points are synchronized: the
+ * event thread feeds frames while the timer thread evaluates.
+ *
  * PRIVACY: this parser reports hold events only — the anchor
  * point (normalized coordinates) and the fire time. It never
  * retains a touch trail: positions are held only as the current
@@ -93,6 +106,18 @@ public final class HoldEventParser {
     private double anchorNy;
     private long anchorMs;
 
+    /** Stream counters (v1.44): how many SYN_REPORT frames this
+     *  parser has seen, and how many holds it has fired. Counts
+     *  only — the bridge's HOLD_WATCH_STATUS op reports them so
+     *  the Settings row can tell a dead stream (0 frames) from
+     *  a parser that never fires (frames > 0, holds 0) from a
+     *  hold the client dropped (holds > 0, no ring). Read from
+     *  the bridge's request threads while the watch thread
+     *  feeds, so the getters are synchronized like every other
+     *  entry point. */
+    private long framesSeen;
+    private long holdsFired;
+
     /**
      * @param minX/maxX/minY/maxY the touchscreen axis ranges from
      *        {@code getevent -p} (device units).
@@ -140,8 +165,9 @@ public final class HoldEventParser {
     /** Feed one decoded event. Frames are delimited by SYN_REPORT;
      *  the hold is evaluated at frame boundaries only, so a
      *  position and its down-flag in the same frame are judged
-     *  together. */
-    public void feedEvent(int type, int code, int value, long timeMs) {
+     *  together. Synchronized: the bridge's timer thread calls
+     *  {@link #evaluateAt} concurrently. */
+    public synchronized void feedEvent(int type, int code, int value, long timeMs) {
         if (type == EV_SYN && code == SYN_REPORT) {
             evaluateFrame(timeMs);
             return;
@@ -210,6 +236,28 @@ public final class HoldEventParser {
     }
 
     private void evaluateFrame(long timeMs) {
+        framesSeen++;
+        evaluate(timeMs);
+    }
+
+    /**
+     * Timer-driven evaluation (v1.43): judge the hold threshold
+     * at an explicit time, with no new frame. The bridge calls
+     * this every 100ms with {@code SystemClock.uptimeMillis()},
+     * which shares the CLOCK_MONOTONIC domain of the getevent
+     * timestamps, so the threshold comparison is the same one
+     * the frame path makes. On hardware that streams frames
+     * continuously this is a no-op (the frame path fires first
+     * and the fired flag blocks a second fire); on hardware
+     * that reports only on change, this is the only evaluation
+     * that can ever fire a still finger's hold. A time earlier
+     * than the anchor simply does not fire.
+     */
+    public synchronized void evaluateAt(long timeMs) {
+        evaluate(timeMs);
+    }
+
+    private void evaluate(long timeMs) {
         if (!down || cancelled || fired || !havePos) return;
         if (!anchorSet) {
             anchorNx = normX(posX);
@@ -226,6 +274,7 @@ public final class HoldEventParser {
         }
         if (timeMs - anchorMs > holdMs) {
             fired = true;
+            holdsFired++;
             if (listener != null) {
                 listener.onHold(new Hold(anchorNx, anchorNy, timeMs));
             }
@@ -242,8 +291,18 @@ public final class HoldEventParser {
         return (double) (y - minY) / (double) (maxY - minY);
     }
 
+    /** Frames (SYN_REPORT boundaries) seen so far. */
+    public synchronized long framesSeen() {
+        return framesSeen;
+    }
+
+    /** Holds fired so far. */
+    public synchronized long holdsFired() {
+        return holdsFired;
+    }
+
     /** Forget all stream state (a fresh {@code getevent} run). */
-    public void reset() {
+    public synchronized void reset() {
         seenMt = false;
         slot = 0;
         down = false;
@@ -251,5 +310,7 @@ public final class HoldEventParser {
         fired = false;
         havePos = false;
         anchorSet = false;
+        framesSeen = 0;
+        holdsFired = 0;
     }
 }

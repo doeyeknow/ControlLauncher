@@ -34,8 +34,16 @@ import org.json.JSONObject;
  */
 public final class BridgeGate {
 
-    /** Minimum bridge protocol version that offers HOLD_WATCH. */
-    public static final int HOLD_WATCH_VERSION = 4;
+    /** Minimum bridge protocol version that offers HOLD_WATCH
+     *  (v4), the v5 SET_APP_ENABLED fix, the v6 bridge
+     *  expansion, the v7 protected-package override, the
+     *  v8 am-start already-on-top verifier, the v9
+     *  timer-driven hold evaluation (without it, the ring
+     *  never opens over other apps on change-only hardware),
+     *  and the v10 HOLD_WATCH_STATUS diagnostics op (without
+     *  it, the Settings row cannot show what the bridge sees).
+     *  Must equal ShellBridgeMain.VERSION. */
+    public static final int HOLD_WATCH_VERSION = 10;
 
     public enum State {
         /** No ping has completed yet this process lifetime. */

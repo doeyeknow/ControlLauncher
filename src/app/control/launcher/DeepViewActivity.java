@@ -33,6 +33,16 @@ public class DeepViewActivity extends ThemedActivity {
     private TextView output;
     private TextView adbStatus;
     private TextView pairLog;
+    /** The running live tail, or null. The tail streams on
+     *  its own thread; Stop (or leaving the screen) ends it. */
+    private ShellBridgeClient.LogcatTail liveTail;
+    private Button liveLogButton;
+    private Button stopLiveButton;
+    /** Lines shown by the live tail, newest last; capped so
+     *  the view never grows without bound. */
+    private final StringBuilder liveLines = new StringBuilder();
+    private int liveLineCount;
+    private static final int LIVE_MAX_LINES = 400;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -251,10 +261,24 @@ public class DeepViewActivity extends ThemedActivity {
         });
         row2.addView(appOps);
         root.addView(row2);
+        LinearLayout row3 = Ui.row(this);
+        liveLogButton = Ui.smallButton(this, "Live log");
+        liveLogButton.setOnClickListener(v -> startLiveTail());
+        row3.addView(liveLogButton);
+        stopLiveButton = Ui.smallButton(this, "Stop live log");
+        stopLiveButton.setOnClickListener(v -> stopLiveTail("Stopped."));
+        stopLiveButton.setEnabled(false);
+        row3.addView(stopLiveButton);
+        root.addView(row3);
         root.addView(Ui.body(this,
                 "The buttons send only an operation name. For AppOps, the field "
                 + "is a package name and is validated. For the log, the field is "
-                + "only a substring filter applied after a fixed logcat read."));
+                + "only a substring filter applied after a fixed logcat read. "
+                + "Live log streams new lines as Android writes them — the last "
+                + "20 first, then live — up to 200 lines, until Stop ends it."));
+        root.addView(Ui.body(this,
+                "A snapshot button above ends a running live tail first: the "
+                + "output block below shows one view at a time."));
 
         output = Ui.text(this, "Choose a view above.", 12, Ui.TEXT);
         output.setTypeface(Typeface.MONOSPACE);
@@ -267,12 +291,12 @@ public class DeepViewActivity extends ThemedActivity {
         root.addView(Ui.body(this,
                 "Allowlist only: process/service/log/AppOps reads, plus the "
                 + "named governed controls on the Deep controls screen "
-                + "(permissions, AppOp policy, force-stop, enable/disable, "
-                + "clear data, background-data, Doze whitelist, Private DNS, "
-                + "and two named launcher settings). No general shell command "
-                + "and no endpoint for other apps. The bridge checks Control's "
-                + "app UID on its local socket and requires Control's private token. "
-                + "Every control attempt is audited."));
+                + "(permissions, AppOp policy, app state, background policy, "
+                + "Private DNS, apps, display, input, capture, power and "
+                + "scheduling, system config, and inspection). No general "
+                + "shell command and no endpoint for other apps. The bridge "
+                + "checks Control's app UID on its local socket and requires "
+                + "Control's private token. Every control attempt is audited."));
     }
 
     @Override
@@ -407,7 +431,103 @@ public class DeepViewActivity extends ThemedActivity {
         }, "bridge-ping").start();
     }
 
+    /** Start the live tail: the last 20 lines, then new
+     *  lines as Android writes them, filtered by the field.
+     *  Any running tail is stopped first. */
+    private void startLiveTail() {
+        stopLiveTail(null);
+        liveLines.setLength(0);
+        liveLineCount = 0;
+        output.setText("Live log — connecting…");
+        liveLogButton.setEnabled(false);
+        stopLiveButton.setEnabled(true);
+        String query = input.getText().toString();
+        liveTail = ShellBridgeClient.startLogcatTail(this, query, 200,
+                new ShellBridgeClient.LogcatTail.Listener() {
+                    @Override public void onAck() {
+                        runOnUiThread(() -> {
+                            if (liveLineCount == 0) {
+                                output.setText("Live log — connected. Lines appear "
+                                        + "as Android writes them.");
+                            }
+                        });
+                    }
+
+                    @Override public void onLine(String line) {
+                        runOnUiThread(() -> appendLiveLine(line));
+                    }
+
+                    @Override public void onDone(String reason) {
+                        runOnUiThread(() -> endLiveTail(reason));
+                    }
+
+                    @Override public void onError(String error) {
+                        runOnUiThread(() -> endLiveTail("Tail failed: " + error));
+                    }
+                });
+    }
+
+    private void appendLiveLine(String line) {
+        liveLines.append(line).append('\n');
+        liveLineCount++;
+        if (liveLineCount > LIVE_MAX_LINES) {
+            // Drop the oldest 100 lines: find the 100th newline
+            // and cut everything before it.
+            int cut = -1;
+            int seen = 0;
+            for (int i = 0; i < liveLines.length(); i++) {
+                if (liveLines.charAt(i) == '\n' && ++seen == 100) {
+                    cut = i + 1;
+                    break;
+                }
+            }
+            if (cut > 0) {
+                liveLines.delete(0, cut);
+                liveLineCount -= 100;
+            }
+        }
+        output.setText("Live log\n\n" + liveLines.toString());
+    }
+
+    /** The tail ended on its own (cap, disconnect, error):
+     *  name the reason and reset the buttons. */
+    private void endLiveTail(String reason) {
+        liveTail = null;
+        liveLogButton.setEnabled(true);
+        stopLiveButton.setEnabled(false);
+        output.setText("Live log\n\n" + liveLines.toString()
+                + "\n[" + reason + "]");
+    }
+
+    /** Stop the tail from the UI. A null note means "stopping
+     *  silently" (a snapshot button or a fresh start takes
+     *  over the output block). */
+    private void stopLiveTail(String note) {
+        if (liveTail != null) {
+            liveTail.stop();
+            liveTail = null;
+        }
+        liveLogButton.setEnabled(true);
+        stopLiveButton.setEnabled(false);
+        if (note != null) {
+            output.setText("Live log\n\n" + liveLines.toString() + "\n[" + note + "]");
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        stopLiveTail(null);
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        stopLiveTail(null);
+        super.onDestroy();
+    }
+
     private void runAsync(String title, Operation operation) {
+        stopLiveTail(null);
         output.setText("Working…");
         new Thread(() -> {
             ShellBridgeClient.Response r;

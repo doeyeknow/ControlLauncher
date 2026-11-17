@@ -63,6 +63,35 @@ public final class Prefs {
     // profile (see Profile.contactVoice) and travel with it.
     public static final String KEY_LOWDATA_ON = "lowdata_on";
     public static final String KEY_LOWDATA_AUTOREAD = "lowdata_autoread";
+    // Walkie send-mode choice (v1.23): "auto" | "voice" | "text"
+    // (see WalkieMode). Runtime state, device-local, like the
+    // low-data switch it replaces. v1.24: AUTO is the default
+    // — absence of a stored value means Auto, and a stored
+    // value is respected as the user's explicit choice. There
+    // is no migration: the v1.23 one-time write from the old
+    // low-data switch is gone (v1.23 never reached a device),
+    // so nothing ever writes an implicit choice. KEY_LOWDATA_ON
+    // stays in sync with the EFFECTIVE mode (true when the
+    // mode in force is TEXT) so any reader of the old key
+    // still sees the truth.
+    public static final String KEY_WALKIE_MODE = "walkie_mode";
+    // Cross-transport bridging (v1.24) — runtime state,
+    // device-local. The switch defaults ON: bridging is the
+    // point of the feature, and turning it off restores the
+    // pre-v1.24 behavior of each road staying separate.
+    public static final String KEY_BRIDGE_ON = "bridge_on";
+
+    /** Protected-package override (v1.36): the Deep view
+     *  switch that permits disable/enable on refuse-listed
+     *  packages. Device-local, never in the portable profile:
+     *  a safety choice that must not travel to another phone
+     *  by import. Default OFF. */
+    public static final String KEY_PROTECTED_OVERRIDE = "protected_override";
+    // Last device_config namespace picked in Deep view's flags
+    // picker (v1.38) — runtime state, device-local. Restored
+    // when the picker loads; a namespace that vanished falls
+    // back to the first one listed.
+    public static final String KEY_LAST_FLAG_NAMESPACE = "last_flag_namespace";
     // Hold-anywhere overlay menu (v1.14) — runtime state,
     // device-local. The switch defaults ON; the overlay
     // permission + a running bridge are the real gates.
@@ -75,6 +104,56 @@ public final class Prefs {
     // The setup step the user last reached; setup resumes there
     // if it is left unfinished. Cleared when setup completes.
     public static final String KEY_SETUP_STEP = "setup_step";
+    // In-app updater (v1.27) — runtime state, device-local.
+    // The last manifest check (when, whether it worked, the
+    // short reason when it didn't), the last good manifest,
+    // and the verified download waiting in the private cache.
+    public static final String KEY_UPDATE_LAST_CHECK = "update_last_check";
+    public static final String KEY_UPDATE_LAST_OK = "update_last_ok";
+    public static final String KEY_UPDATE_LAST_ERROR = "update_last_error";
+    public static final String KEY_UPDATE_KNOWN_CODE = "update_known_code";
+    public static final String KEY_UPDATE_KNOWN_NAME = "update_known_name";
+    public static final String KEY_UPDATE_KNOWN_SHA = "update_known_sha";
+    public static final String KEY_UPDATE_KNOWN_SIZE = "update_known_size";
+    public static final String KEY_UPDATE_APK_URL = "update_apk_url";
+    public static final String KEY_UPDATE_DOWNLOADED_CODE = "update_downloaded_code";
+    public static final String KEY_UPDATE_DOWNLOADED_NAME = "update_downloaded_name";
+    public static final String KEY_UPDATE_FAILURE = "update_failure";
+
+    // GitHub-hosted word dictionary (v1.29) — runtime state,
+    // device-local. The fetched list's version, word count
+    // and sha256, and the last background check (when, and
+    // the short reason when it failed). The learned words
+    // and taught sets live in files, not prefs, and are
+    // never part of a profile export.
+    public static final String KEY_DICT_VERSION = "dict_version";
+    public static final String KEY_DICT_COUNT = "dict_count";
+    public static final String KEY_DICT_SHA = "dict_sha";
+    public static final String KEY_DICT_LAST_CHECK = "dict_last_check";
+    public static final String KEY_DICT_LAST_ERROR = "dict_last_error";
+    // Dictionary write-back (v1.30): the last proposal attempt
+    // (success or failure — the throttle paces attempts, not
+    // just successes) and how many words this phone has
+    // proposed in total. The submitted WORDS live in a file,
+    // not prefs, and are never part of a profile export.
+    public static final String KEY_DICT_LAST_SUBMIT = "dict_last_submit";
+    public static final String KEY_DICT_SUBMITTED_COUNT = "dict_submitted_count";
+
+    // Camera sharing (v1.31): whether this phone serves its
+    // reachable cameras to mesh peers. Runtime state,
+    // device-local, default OFF. Never exported: it governs
+    // serving, not the cameras themselves.
+    public static final String KEY_CAM_SHARE = "cam_share";
+
+    // Display originals (v1.35): the size, density, and
+    // overscan the phone had when the Display section first
+    // read them, before any change through Control. Reset
+    // restores exactly these. Recorded once — a later read
+    // never overwrites them — and never exported: they
+    // describe this phone's display, not the user's profile.
+    public static final String KEY_WM_ORIGINAL_SIZE = "wm_original_size";
+    public static final String KEY_WM_ORIGINAL_DENSITY = "wm_original_density";
+    public static final String KEY_WM_ORIGINAL_OVERSCAN = "wm_original_overscan";
 
     private Prefs() {}
 

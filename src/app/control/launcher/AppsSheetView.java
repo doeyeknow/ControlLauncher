@@ -1,6 +1,9 @@
 package app.control.launcher;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.net.Uri;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -10,6 +13,7 @@ import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -28,8 +32,11 @@ import java.util.Set;
  *
  * The grid is built from plain cells with their own click handlers
  * (v1 used an AbsListView whose rows could swallow taps; see
- * BUILD_NOTES). Tap opens the app; long-press stars/unstars it as a
- * favorite — favorites live in the profile and show on Home.
+ * BUILD_NOTES). Tap opens the app; long-press opens a popup menu
+ * (v1.22): star/unstar it as a favorite — favorites live in the
+ * profile and show on Home — or view the app's activities; v1.41
+ * adds Uninstall (every app except Control itself), via the
+ * standard system flow.
  *
  * The list comes from AppListStore (v1.9): the cached list shows
  * instantly, a background refresh re-scans, and the grid rebuilds
@@ -109,7 +116,7 @@ public class AppsSheetView extends LinearLayout {
         search.setPadding(Ui.dp(act, 14), Ui.dp(act, 10), Ui.dp(act, 14), Ui.dp(act, 10));
         addView(search, Ui.wrap(0, 8, 0, 0, act));
 
-        TextView hint = Ui.text(act, "Tap to open · hold to ★ a favorite · drag the top down to close", 13, Ui.DIM);
+        TextView hint = Ui.text(act, "Tap to open · hold for options · drag the top down to close", 13, Ui.DIM);
         hint.setTypeface(android.graphics.Typeface.MONOSPACE);
         hint.setPadding(0, Ui.dp(act, 8), 0, 0);
         addView(hint);
@@ -229,22 +236,85 @@ public class AppsSheetView extends LinearLayout {
             if (launchedListener != null) launchedListener.run();
         });
         cell.setOnLongClickListener(v -> {
-            Set<String> now = Prefs.getSet(act, Prefs.KEY_FAVORITES);
-            boolean added;
-            if (now.contains(e.pkg)) {
-                now.remove(e.pkg);
-                added = false;
-            } else {
-                now.add(e.pkg);
-                added = true;
-            }
-            Prefs.putSet(act, Prefs.KEY_FAVORITES, now);
-            Toast.makeText(act, added
-                    ? e.label + " added to favorites"
-                    : e.label + " removed from favorites", Toast.LENGTH_SHORT).show();
-            buildGrid();
+            showCellMenu(v, e);
             return true;
         });
         return cell;
+    }
+
+    /** Long-press popup menu (v1.22, the Connections pattern;
+     *  v1.41 adds Uninstall): the favorite toggle the long-press
+     *  used to do directly, "View activities", and — for every
+     *  app except Control itself — "Uninstall". Tap-to-launch is
+     *  untouched. The item list comes from {@link DrawerMenu} so
+     *  the harness pins exactly what appears; this method only
+     *  wires the actions. */
+    private void showCellMenu(View anchor, InstalledApps.Entry e) {
+        PopupMenu menu = new PopupMenu(act, anchor);
+        List<Runnable> actions = new ArrayList<>();
+        boolean starred = Prefs.getSet(act, Prefs.KEY_FAVORITES).contains(e.pkg);
+        for (DrawerMenu.Item it : DrawerMenu.items(e.pkg, starred)) {
+            if (DrawerMenu.ACTION_FAVORITE.equals(it.action)) {
+                addMenu(menu, actions, it.label,
+                        () -> {
+                            Set<String> now = Prefs.getSet(act, Prefs.KEY_FAVORITES);
+                            boolean added;
+                            if (now.contains(e.pkg)) {
+                                now.remove(e.pkg);
+                                added = false;
+                            } else {
+                                now.add(e.pkg);
+                                added = true;
+                            }
+                            Prefs.putSet(act, Prefs.KEY_FAVORITES, now);
+                            Toast.makeText(act, added
+                                    ? e.label + " added to favorites"
+                                    : e.label + " removed from favorites", Toast.LENGTH_SHORT).show();
+                            buildGrid();
+                        });
+            } else if (DrawerMenu.ACTION_ACTIVITIES.equals(it.action)) {
+                addMenu(menu, actions, it.label, () -> {
+                    Intent i = new Intent(act, AppActivitiesActivity.class);
+                    i.putExtra(AppActivitiesActivity.EXTRA_PACKAGE, e.pkg);
+                    i.putExtra(AppActivitiesActivity.EXTRA_LABEL, e.label);
+                    hide();
+                    act.startActivity(i);
+                });
+            } else if (DrawerMenu.ACTION_UNINSTALL.equals(it.action)) {
+                addMenu(menu, actions, it.label, () -> {
+                    // The standard system flow, exactly what stock
+                    // launchers do: Android itself shows the
+                    // confirm dialog and performs the removal —
+                    // including saying no, or offering only an
+                    // update removal, for system apps. No bridge,
+                    // no permission, no audit record: the user
+                    // confirms in Android's own dialog. The sheet
+                    // stays open on purpose: the removal reaches
+                    // it through PackageChangeReceiver +
+                    // AppListStore, which rebuilds the grid, so
+                    // the app is visibly gone on return. A
+                    // cancelled uninstall changes nothing.
+                    try {
+                        Intent i = new Intent(Intent.ACTION_DELETE);
+                        i.setData(Uri.parse("package:" + e.pkg));
+                        act.startActivity(i);
+                    } catch (ActivityNotFoundException gone) {
+                        Toast.makeText(act,
+                                "Android could not open the uninstaller.",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        }
+        menu.setOnMenuItemClickListener(item -> {
+            actions.get(item.getItemId()).run();
+            return true;
+        });
+        menu.show();
+    }
+
+    private void addMenu(PopupMenu menu, List<Runnable> actions, String label, Runnable r) {
+        menu.getMenu().add(0, actions.size(), actions.size(), label);
+        actions.add(r);
     }
 }

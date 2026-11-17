@@ -185,17 +185,21 @@ public class LowDataHarness {
     // ---- 3. envelope ----
 
     private static void envelopeLeg() {
-        // ordinary texts: byte-identical to the v1.3 shape (no marker)
-        eq(LowDataEnvelope.build("hello", false), "{\"t\":\"text\",\"text\":\"hello\"}", "ordinary envelope shape");
-        eq(LowDataEnvelope.build("hello", true), "{\"t\":\"text\",\"text\":\"hello\",\"ld\":true}", "low-data envelope shape");
-        eq(LowDataEnvelope.build("", false), "{\"t\":\"text\",\"text\":\"\"}", "empty text envelope");
-        eq(LowDataEnvelope.build(null, false), "{\"t\":\"text\",\"text\":\"\"}", "null text envelope");
+        // v1.32: every text codes on the "w" key, no marker.
+        String helloWire = WordDict.encode("hello");
+        eq(LowDataEnvelope.build("hello", false), "{\"t\":\"text\",\"w\":\"" + helloWire + "\"}", "ordinary envelope shape");
+        eq(LowDataEnvelope.build("hello", true), "{\"t\":\"text\",\"w\":\"" + helloWire + "\",\"ld\":true}", "low-data envelope shape");
+        eq(LowDataEnvelope.build("", false), "{\"t\":\"text\",\"w\":\"\"}", "empty text envelope");
+        eq(LowDataEnvelope.build(null, false), "{\"t\":\"text\",\"w\":\"\"}", "null text envelope");
 
-        // round-trips incl. escaping
+        // round-trips incl. escaping. The texts start
+        // capitalized (or with a non-word) so the codec's
+        // sentence-start normalization cannot change them:
+        // this leg proves the envelope, not the codec.
         String[] texts = {
-            "plain", "with \"quotes\"", "back\\slash", "new\nline", "tab\there",
+            "Plain", "With \"quotes\"", "Back\\slash", "New\nline", "Tab\there",
             "unicode \u00e9\u4e2d", "emoji \uD83D\uDE00", "ctrl\u0001char",
-            "{\"t\":\"text\"}", "ld\":true, \"x\":\"", "trailing\\", ""
+            "{\"t\":\"text\"}", "ld\":true, \"x\":\"", "Trailing\\", ""
         };
         for (String t : texts) {
             LowDataEnvelope.Parsed p = LowDataEnvelope.parse(LowDataEnvelope.build(t, true));
@@ -203,20 +207,30 @@ public class LowDataHarness {
             LowDataEnvelope.Parsed p2 = LowDataEnvelope.parse(LowDataEnvelope.build(t, false));
             check(p2 != null && t.equals(p2.text) && !p2.lowData, "round-trip plain: " + escapeForLog(t));
         }
+        // A lowercase sentence start normalizes through the
+        // coded path (the codec is live in the envelope).
+        LowDataEnvelope.Parsed norm = LowDataEnvelope.parse(
+                LowDataEnvelope.build("hello there friend", false));
+        check(norm != null && "Hello there friend".equals(norm.text), "lowercase start normalizes");
 
         // old-envelope tolerance
         LowDataEnvelope.Parsed old = LowDataEnvelope.parse("{\"t\":\"text\",\"text\":\"hi\"}");
         check(old != null && "hi".equals(old.text) && !old.lowData, "old envelope tolerated");
         LowDataEnvelope.Parsed spaced = LowDataEnvelope.parse("{ \"t\" : \"text\" , \"text\" : \"hi\" , \"ld\" : true }");
         check(spaced != null && spaced.lowData, "spaced envelope parsed");
+        // a spaced NEW-shape envelope parses too
+        LowDataEnvelope.Parsed spacedW = LowDataEnvelope.parse(
+                "{ \"t\" : \"text\" , \"w\" : \"" + WordDict.encode("Hello there") + "\" , \"ld\" : true }");
+        check(spacedW != null && "Hello there".equals(spacedW.text) && spacedW.lowData, "spaced w envelope parsed");
 
         // rejection: bursts and malformed payloads are not envelopes
         check(LowDataEnvelope.parse(null) == null, "null rejected");
         check(LowDataEnvelope.parse("") == null, "empty rejected");
         check(LowDataEnvelope.parse("garbage bytes \u0001\u0002") == null, "burst bytes rejected");
         check(LowDataEnvelope.parse("{\"t\":\"burst\"}") == null, "other t rejected");
-        check(LowDataEnvelope.parse("{\"t\":\"text\"}") == null, "missing text rejected");
+        check(LowDataEnvelope.parse("{\"t\":\"text\"}") == null, "missing payload rejected");
         check(LowDataEnvelope.parse("{\"t\":\"text\",\"text\":42}") == null, "numeric text rejected");
+        check(LowDataEnvelope.parse("{\"t\":\"text\",\"w\":42}") == null, "numeric w rejected");
         check(LowDataEnvelope.parse("{\"t\":\"text\",\"text\":\"x\"") == null, "unclosed rejected");
         check(LowDataEnvelope.parse("[{\"t\":\"text\",\"text\":\"x\"}]") == null, "array rejected");
         check(LowDataEnvelope.parse("{\"t\":\"Text\",\"text\":\"x\"}") == null, "t case-sensitive");
@@ -230,14 +244,19 @@ public class LowDataHarness {
         check(!LowDataEnvelope.parse("{\"t\":\"text\",\"text\":\"x\",\"ld\":trueish}").lowData, "ld trueish disarms");
         check(LowDataEnvelope.parse("{\"t\":\"text\",\"text\":\"x\",\"ld\":true,\"ld\":false}").lowData, "first ld wins");
 
-        // OLD-CLIENT readability: a pre-v1.11 build parses with
-        // org.json and reads only t/text — prove both directions.
+        // OLD-CLIENT behavior (v1.32 breaking change, stated
+        // honestly): a pre-v1.32 build parses with org.json
+        // and reads only t/text — the new shape carries no
+        // "text" key, so the old build sees an empty text
+        // (the relay path's silent miss). The new code still
+        // parses old-built envelopes.
         try {
             for (boolean ld : new boolean[]{false, true}) {
                 String env = LowDataEnvelope.build("hello \"world\"", ld);
                 org.json.JSONObject o = new org.json.JSONObject(env);
                 eq(o.optString("t", ""), "text", "old client t (ld=" + ld + ")");
-                eq(o.optString("text", ""), "hello \"world\"", "old client text (ld=" + ld + ")");
+                eq(o.optString("text", ""), "", "old client sees no text (ld=" + ld + ")");
+                check(o.has("w") && !o.optString("w", "").isEmpty(), "new shape carries w (ld=" + ld + ")");
             }
             // and an old-built envelope still parses in the new code
             org.json.JSONObject oldBuilt = new org.json.JSONObject();

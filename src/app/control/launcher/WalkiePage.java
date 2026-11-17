@@ -21,6 +21,7 @@ import android.net.wifi.p2p.WifiP2pManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -28,9 +29,11 @@ import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -45,12 +48,16 @@ import java.net.InetAddress;
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The walkie-talkie: one push-to-talk engine over every road that
@@ -62,11 +69,8 @@ import java.util.Set;
 public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
 
     private final Activity act;
-    private ScrollView scrollRoot;
     private View tunerAnchor;
     private View pttAnchor;
-    private View threadAnchor;
-    private View composerAnchor;
 
 
     private static final int SAMPLE_RATE = 16000;
@@ -78,13 +82,18 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private TextView bigNumber;
     private TextView readoutFreq;
     private TextView readoutLabel;
-    private TextView modeLine;
+    // v1.23: the display window's indicators row — road/signal,
+    // mode, and the unplayed count for the tuned channel.
+    private TextView roadText;
+    private TextView modeText;
+    private TextView badgeText;
     private TunerView tuner;
     private TextView statusText;
     private TextView talkerText;
     private TextView membersText;
     private Button pttButton;
     private Button scanButton;
+    private Button messagesButton;
     private Button channelActionBtn;
     private Button channelsBtn;
     private LinearLayout playBlock;
@@ -105,7 +114,25 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private final List<JSONObject> historyEntries = new ArrayList<>();
     private Button historyButton;
     private TextView threadEmptyHint;
+    private ListView threadList;
     private EditText composer;
+    // v1.20: the road sections (mesh/LAN, internet, Bluetooth) live
+    // in a hidden holder and are shown one at a time in a dialog, so
+    // the page itself stays fixed-height with no page scroll.
+    // v1.23: the messages panel and the radio menu live the same
+    // way — built once, shown in a dialog, returned to the holder
+    // on dismiss — so the radio face shows only the essentials.
+    private LinearLayout sectionHolder;
+    private LinearLayout panelHolder;
+    private View messagesPanelView;
+    private View menuPanelView;
+    private AlertDialog panelDialog;
+    private View shownPanel;
+    private View localSectionView;
+    private View internetSectionView;
+    private View bluetoothSectionView;
+    private AlertDialog sectionDialog;
+    private View shownSection;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     // recording / playback
@@ -117,18 +144,45 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private ToneGenerator tones;
 
     // low-data mode (v1.11): on-device transcription + TTS voice profiles
+    // v1.23: the mode is a three-way choice (Auto / Voice / Text) and
+    // the old low-data switch is the Text choice. Auto measures the
+    // connection with a timed relay round trip (see WalkieMode) and
+    // picks TEXT on a slow link, VOICE on a fast one; manual choices
+    // always win. The effective mode feeds the existing low-data
+    // path — LowDataSpeaker, the envelope, the transcription dialog
+    // — unchanged; lowDataOn() below is the single seam.
     private SpeechTranscriber transcriber;
     private LowDataSpeaker speaker;
     private boolean lowDataRecording;
     private volatile boolean transcribing;
-    private Switch lowDataSwitch;
+    private Button modeAutoBtn;
+    private Button modeVoiceBtn;
+    private Button modeTextBtn;
     private Switch autoReadSwitch;
     private TextView lowDataStatus;
+    private TextView readAloudStatus;
+    // v1.20: switch-row statuses ride inline, single-line and
+    // ellipsized; the full text lives here for the info dialog.
+    private String lowDataStatusFull = "";
+    private String readAloudStatusFull = "";
+    private String subscribeStateFull = "";
     private LinearLayout modelBlock;
     private TextView modelStatus;
     private ProgressBar modelProgress;
     private Button modelButton;
     private boolean downloadingModel;
+
+    // Automatic mode (v1.23): the decision in force, the last
+    // probe's outcome, and the single-flight guard. The probe
+    // runs on entering the page, on road change, and once a
+    // minute while idle — never during a transmission.
+    private WalkieMode.Mode effectiveMode = WalkieMode.Mode.VOICE;
+    private WalkieMode.Probe lastProbe = WalkieMode.Probe.NONE;
+    private long lastRttMs;
+    private boolean probing;
+    private boolean pageDead;
+    private int lastMemberCount;
+    private String lastBtPeer = "";
 
     // transports
     private MeshNet mesh;
@@ -154,6 +208,58 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private Switch subscribeSwitch;
     private TextView subscribeState;
     private BroadcastReceiver subscriptionReceiver;
+
+    // cross-transport bridging (v1.24): received messages pass
+    // live to the other connected roads. The switch defaults
+    // ON; off restores the pre-v1.24 behavior exactly. The
+    // in-flight flags enforce single-flight per transport: a
+    // forward never starts while that road's previous forward
+    // is still running, and a skipped forward is never
+    // retried — bridging is live only, never queued. Local
+    // forwards run on the bridge pool, never on the calling
+    // thread (socket writes must not stall the UI or a
+    // transport reader); relay forwards use RelayClient's own
+    // pool, with the flag cleared in the post callback.
+    private Switch bridgeSwitch;
+    private TextView bridgeState;
+    private String bridgeStateFull = "";
+    private static final ExecutorService BRIDGE_POOL =
+            Executors.newCachedThreadPool();
+    private final AtomicBoolean relayBridgeBusy = new AtomicBoolean();
+    private final AtomicBoolean meshBridgeBusy = new AtomicBoolean();
+    private final AtomicBoolean btBridgeBusy = new AtomicBoolean();
+
+    // Inbound live-burst capture for bridging: mesh and
+    // Bluetooth voice streams to the speaker with no thread
+    // record, so a burst worth bridging is accumulated as it
+    // plays and forwarded when the spurt ends. Each road has
+    // its own lock: the spurt-start, chunk, and spurt-end
+    // callbacks run on transport reader threads, and a
+    // back-to-back spurt from another member must never
+    // corrupt the snapshot — at worst one burst goes
+    // unbridged (it still played live). The cap is 60 seconds
+    // of audio; a longer spurt plays live but is not bridged,
+    // rather than bridged truncated.
+    private static final int MAX_BRIDGE_SPURT_PCM = 60 * SAMPLE_RATE * 2;
+    private static final int MAX_BRIDGE_SPURT_ADPCM = 60 * SAMPLE_RATE / 2;
+    private final Object meshSpurtLock = new Object();
+    private final ByteArrayOutputStream meshSpurtPcm = new ByteArrayOutputStream();
+    private String meshSpurtTalker = "";
+    private BridgeRule.Relayed meshSpurtMeta;
+    private String meshSpurtMid = "";
+    private boolean meshSpurtOverflow;
+    private final Object btSpurtLock = new Object();
+    private final ByteArrayOutputStream btSpurtAdpcm = new ByteArrayOutputStream();
+    private String btSpurtTalker = "";
+    private BridgeRule.Relayed btSpurtMeta;
+    private String btSpurtMid = "";
+    private boolean btSpurtOverflow;
+    // The message id of the spurt THIS phone is sending (v1.24):
+    // minted at press time, carried on the local roads, and
+    // reused as the relay post's client message id, so the
+    // originator's own post and any gatewayed copy share one
+    // bridge id and receivers land the burst once.
+    private String spurtMid = "";
 
     // scan
     private boolean scanning;
@@ -188,6 +294,12 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         transcriber = new SpeechTranscriber();
         speaker = new LowDataSpeaker(host);
         channelNumber = Prefs.get(act).getInt(ChannelsActivity.PREF_LAST_CHANNEL, 1);
+        // The effective mode is decided before the UI builds:
+        // the mode section renders from it. No stored choice
+        // means Auto (v1.24 default); with no probe yet the
+        // decision reads as Voice until the first measurement.
+        effectiveMode = WalkieMode.decide(modeChoice(), WalkieMode.Mode.VOICE,
+                false, WalkieMode.Probe.NONE, 0);
         buildUi();
         retune(channelNumber);
         tuner.tuneTo(channelNumber, false);
@@ -216,9 +328,26 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         }
         registerP2pReceiver();
         registerSubscriptionReceiver();
-        refreshLowDataBlock();
+        refreshModeSection();
         refreshSubscriptionSection();
+        refreshBridgeSection();
         refreshChannelsButton();
+        refreshFaceIndicators();
+        refreshModeLine();
+        // Relay arrivals the subscription service stored while
+        // this page was away get their one bridge decision now
+        // (v1.24): the local sessions live on this page, so
+        // this is the first moment they can be forwarded. The
+        // thread reloads first, so the scan and the lists see
+        // the same entries.
+        reloadThread();
+        bridgePendingRelayEntries();
+        // Coming onto the page is a probe trigger (v1.23): the
+        // connection is tested now, and once a minute while the
+        // page stays shown and idle.
+        maybeProbe();
+        ui.removeCallbacks(probeTick);
+        ui.postDelayed(probeTick, WalkieMode.PROBE_INTERVAL_MS);
         // The subscription service is the poller for
         // subscribed channels; coming forward reconciles it
         // back to life if Samsung killed it.
@@ -228,6 +357,7 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     @Override
     public void onPageHidden() {
         stopJoinPlay();
+        ui.removeCallbacks(probeTick);
         if (p2pReceiver != null) {
             try {
                 act.unregisterReceiver(p2pReceiver);
@@ -263,7 +393,15 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 if (SubscriptionService.ACTION_MESSAGE.equals(action)) {
                     String id = intent.getStringExtra(
                             SubscriptionService.EXTRA_IDENTITY);
-                    if (id != null && id.equals(identity)) reloadThread();
+                    if (id != null && id.equals(identity)) {
+                        reloadThread();
+                        // A background arrival on the tuned
+                        // channel gets its one bridge decision
+                        // now (v1.24) — the service stores it,
+                        // this page forwards it to the local
+                        // roads, which live here.
+                        bridgePendingRelayEntries();
+                    }
                     refreshChannelsButton();
                 } else if (SubscriptionService.ACTION_STATE.equals(action)) {
                     refreshSubscriptionSection();
@@ -283,6 +421,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
 
     @Override
     public void onPageDestroy() {
+        pageDead = true;
+        ui.removeCallbacks(probeTick);
         stopJoinPlay();
         relayRunning = false;
         relayGen++;
@@ -293,13 +433,16 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         if (speaker != null) speaker.shutdown();
     }
 
-    /** The tuner sweep, the hold-to-talk button, the thread and the
-     *  composer own their touches; everything else on this page lets
-     *  the pager take a horizontal swipe. */
+    /** The channel knob and the hold-to-talk button own their
+     *  touches; everything else on the face lets the pager take
+     *  a horizontal swipe. The message thread and the composer
+     *  live in the messages panel dialog (v1.23), a separate
+     *  window the pager never sees, so they no longer anchor
+     *  gestures here; the join-sound block rides inside that
+     *  panel and is pager chrome no longer. */
     @Override
     public boolean ownsHorizontalGesture(float x, float y) {
-        return inside(tunerAnchor, x, y) || inside(pttAnchor, x, y)
-                || inside(threadAnchor, x, y) || inside(composerAnchor, x, y);
+        return inside(tunerAnchor, x, y) || inside(pttAnchor, x, y);
     }
 
     private boolean inside(View v, float x, float y) {
@@ -313,30 +456,236 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         return x >= lx && x < lx + v.getWidth() && y >= ly && y < ly + v.getHeight();
     }
 
+    // ------------------------------------------------------------ fixed-layout helpers (v1.20)
+
+    /** The switch sections' explanations, verbatim from their old
+     *  inline bodies: they now live in the info dialogs behind each
+     *  switch row's status line, so the page stays fixed-height
+     *  without losing a word of the guidance. */
+    private static final String LOW_DATA_BODY =
+            "Sends text instead of audio. You talk, this phone "
+            + "transcribes your words on-device, and you check them "
+            + "before anything is sent. The other phone reads the "
+            + "text aloud in a synthetic voice profile you choose per "
+            + "contact — recognizable, but not their real voice. "
+            + "Transcription works fully offline once the speech "
+            + "model is downloaded.";
+    private static final String READ_ALOUD_BODY =
+            "Every text this phone receives in a walkie channel is "
+            + "read aloud in the sender's voice profile — a synthetic "
+            + "voice you choose per contact, recognizable, but not "
+            + "their real voice. Never speaks while Quiet is on.";
+    private static final String SUBSCRIBE_BODY =
+            "Keep listening to this channel over the internet "
+            + "relay, even when you're tuned elsewhere. Messages "
+            + "arrive in this channel's thread and are read aloud, "
+            + "just as if you were tuned here. Each subscribed "
+            + "channel is checked every few seconds — more "
+            + "subscriptions means each one is checked less often "
+            + "— and background listening uses a little mobile "
+            + "data and battery. Quiet silences the read-aloud, "
+            + "as always. The mesh and Bluetooth roads are not "
+            + "affected: they only ever hear the tuned channel.";
+    private static final String BRIDGE_BODY =
+            "Messages received on one road are passed live to the "
+            + "other roads connected right now — so a message sent "
+            + "on the mesh reaches people on the internet relay, "
+            + "and the other way around. A phone with data "
+            + "publishes mesh and Bluetooth messages to this "
+            + "channel on the relay as they arrive. Bridging is "
+            + "live only: nothing is stored for later, so a "
+            + "message that arrives while no phone has data stays "
+            + "within the mesh, and only new messages publish "
+            + "once a phone gains data. A relayed message is "
+            + "marked with the phone that relayed it — that phone "
+            + "vouches for delivery, not for who wrote it. "
+            + "Private channels are bridged only by phones "
+            + "holding the channel key. Turn it off and each road "
+            + "stays separate, as before.";
+
+    /** A small button sized for the fixed layout: 32dp tall, no
+     *  vertical margins (Ui.smallButton is 40dp + 8dp of margins,
+     *  which the fixed budget cannot afford on every row). The
+     *  shared Ui factory is untouched — this is page-local. */
+    private Button compactButton(String label) {
+        Button b = Ui.smallButton(act, label);
+        b.setMinHeight(Ui.dp(act, 32));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(0, 0, Ui.dp(act, 6), 0);
+        b.setLayoutParams(p);
+        return b;
+    }
+
+    /** One switch row: the switch plus its status on the SAME line,
+     *  single-line and ellipsized, so switch states never grow the
+     *  page. Tapping the status opens the section's info dialog
+     *  with the full text. */
+    private LinearLayout switchRow(Switch sw, TextView status) {
+        LinearLayout row = Ui.row(act);
+        row.addView(sw);
+        status.setSingleLine(true);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setPadding(Ui.dp(act, 8), 0, 0, 0);
+        row.addView(status, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    /** The info dialog behind a switch row's status line: the
+     *  section's explanation plus its full current state, so
+     *  nothing the inline row truncates is ever lost. */
+    private void showSwitchInfo(String title, String body, String stateFull) {
+        LinearLayout box = Ui.column(act);
+        box.setPadding(Ui.dp(act, 12), Ui.dp(act, 8),
+                Ui.dp(act, 12), Ui.dp(act, 8));
+        box.addView(Ui.body(act, body));
+        if (stateFull != null && !stateFull.isEmpty()) {
+            box.addView(Ui.text(act, stateFull, 13, Ui.TEXT),
+                    Ui.wrap(0, 10, 0, 0, act));
+        }
+        ScrollView sc = new ScrollView(act);
+        sc.addView(box);
+        new AlertDialog.Builder(act)
+                .setTitle(title)
+                .setView(sc)
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    /** Shows one road section in a dialog. The section view is
+     *  built once and lives in the hidden holder between openings;
+     *  opening moves it into the dialog, dismissing returns it —
+     *  so its buttons, switches, and listeners are the same live
+     *  objects, never rebuilt. */
+    private void showRoadSection(String title, View section) {
+        closeRoadSection();
+        if (section.getParent() instanceof ViewGroup) {
+            ((ViewGroup) section.getParent()).removeView(section);
+        }
+        LinearLayout box = Ui.column(act);
+        box.setPadding(Ui.dp(act, 12), Ui.dp(act, 4),
+                Ui.dp(act, 12), Ui.dp(act, 8));
+        box.addView(section);
+        ScrollView sc = new ScrollView(act);
+        sc.addView(box);
+        shownSection = section;
+        sectionDialog = new AlertDialog.Builder(act)
+                .setTitle(title)
+                .setView(sc)
+                .setPositiveButton("Close", null)
+                .setOnDismissListener(d -> returnSection())
+                .show();
+    }
+
+    private void returnSection() {
+        if (shownSection != null && sectionHolder != null) {
+            if (shownSection.getParent() instanceof ViewGroup) {
+                ((ViewGroup) shownSection.getParent()).removeView(shownSection);
+            }
+            sectionHolder.addView(shownSection);
+            shownSection = null;
+        }
+        sectionDialog = null;
+    }
+
+    private void closeRoadSection() {
+        if (sectionDialog != null) {
+            AlertDialog d = sectionDialog;
+            sectionDialog = null;
+            d.dismiss();
+        }
+    }
+
+    /** Shows one panel (messages, radio menu) in a dialog. Same
+     *  re-parenting pattern as the road sections: the panel is
+     *  built once and lives in the hidden holder between
+     *  openings, so its views, adapters, and listeners are the
+     *  same live objects, never rebuilt. The messages panel is
+     *  NOT wrapped in a ScrollView — its list scrolls
+     *  internally, and nested scrolling would break it — and
+     *  its window resizes for the keyboard so the composer
+     *  stays visible. The menu panel scrolls inside its dialog
+     *  (the no-scroll rule governs the page, not dialogs). */
+    private void showPanelDialog(String title, View panel, boolean scrollable) {
+        closePanelDialog();
+        if (panel.getParent() instanceof ViewGroup) {
+            ((ViewGroup) panel.getParent()).removeView(panel);
+        }
+        View content = panel;
+        if (scrollable) {
+            LinearLayout box = Ui.column(act);
+            box.setPadding(Ui.dp(act, 12), Ui.dp(act, 4),
+                    Ui.dp(act, 12), Ui.dp(act, 8));
+            box.addView(panel);
+            ScrollView sc = new ScrollView(act);
+            sc.addView(box);
+            content = sc;
+        }
+        shownPanel = panel;
+        panelDialog = new AlertDialog.Builder(act)
+                .setTitle(title)
+                .setView(content)
+                .setPositiveButton("Close", null)
+                .setOnDismissListener(d -> returnPanel())
+                .show();
+        if (!scrollable && panelDialog.getWindow() != null) {
+            panelDialog.getWindow().setSoftInputMode(
+                    android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+        if (panel == messagesPanelView) refreshThreadBottomPadding();
+    }
+
+    private void returnPanel() {
+        if (shownPanel != null && panelHolder != null) {
+            if (shownPanel.getParent() instanceof ViewGroup) {
+                ((ViewGroup) shownPanel.getParent()).removeView(shownPanel);
+            }
+            panelHolder.addView(shownPanel);
+            shownPanel = null;
+        }
+        panelDialog = null;
+    }
+
+    private void closePanelDialog() {
+        if (panelDialog != null) {
+            AlertDialog d = panelDialog;
+            panelDialog = null;
+            d.dismiss();
+        }
+    }
+
     // ------------------------------------------------------------ UI
 
+    // v1.23: the page is a RADIO. A slim header (title, All
+    // channels, Configure), then the radio body — display
+    // window, channel knob, status strip, speaker grille, and
+    // the large talk button — then the access row (Messages,
+    // Menu, Scan). The heights follow WalkieLayout's budget
+    // and the face never scrolls: the message thread + composer
+    // live in the messages panel dialog, and the switches,
+    // roads, and subscription controls live in the radio menu
+    // dialog. Nothing was dropped — everything is one tap
+    // away, and every control keeps its behavior and copy.
     private void buildUi() {
-        LinearLayout root = Ui.column(act);
         int pad = Ui.dp(act, 16);
-        root.setPadding(pad, Ui.dp(act, 12), pad, pad);
-        ScrollView scroll = new ScrollView(act);
-        scroll.setBackgroundColor(0x00000000);
-        scroll.addView(root);
-        scrollRoot = scroll;
-        addView(scroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        setPadding(pad, Ui.dp(act, WalkieLayout.PAGE_PAD_TOP_DP),
+                pad, Ui.dp(act, WalkieLayout.PAGE_PAD_BOTTOM_DP));
 
-        // The private channel's join sound plays from the BOTTOM of
-        // the radio screen (v1.2 placement, audio since v1.8):
-        // pinned outside the scrolling column so it never covers
-        // the tuner or the talk button. It is pager chrome — swipes
-        // starting on it change pages — and tapping it plays the
-        // join sound for the tuned channel. Open channel → no block.
+        // The private channel's join sound plays from the BOTTOM
+        // of the messages panel (v1.2 placement, audio since
+        // v1.8; the panel since v1.23). Built here, parented
+        // into the panel's thread region — it overlays the
+        // bottom of the list there, costs no layout height,
+        // and tapping it plays the join sound for the tuned
+        // channel. Open channel → no block.
         playBlock = Ui.column(act);
         playBlock.setGravity(Gravity.CENTER_HORIZONTAL);
         playBlock.setBackgroundColor(Ui.SURFACE);
-        playBlock.setPadding(pad, Ui.dp(act, 10), pad, Ui.dp(act, 10));
+        playBlock.setPadding(pad, Ui.dp(act, 8), pad, Ui.dp(act, 8));
         playJoinButton = Ui.button(act, "Play join sound", true);
+        playJoinButton.setMinHeight(Ui.dp(act, 36));
         playJoinButton.setOnClickListener(v -> onPlayJoinTapped());
         playBlock.addView(playJoinButton);
         playProgress = new ProgressBar(act, null,
@@ -352,48 +701,82 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         playBlock.addView(playCaption, Ui.wrap(0, 6, 0, 0, act));
         playBlock.setOnClickListener(v -> onPlayJoinTapped());
         playBlock.setVisibility(GONE);
-        addView(playBlock, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout header = Ui.row(act);
         TextView title = Ui.text(act, "WALKIE-TALKIE", 13, Ui.DIM);
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        channelsBtn = Ui.smallButton(act, "All channels");
+        channelsBtn = compactButton("All channels");
         channelsBtn.setOnClickListener(v -> act.startActivity(new Intent(act, ChannelsActivity.class)));
         header.addView(channelsBtn);
-        Button editBtn = Ui.smallButton(act, "Configure");
+        Button editBtn = compactButton("Configure");
         editBtn.setOnClickListener(v -> {
             Intent i = new Intent(act, ChannelEditActivity.class);
             i.putExtra("number", channelNumber);
             act.startActivity(i);
         });
         header.addView(editBtn);
-        root.addView(header);
+        addView(header);
 
-        // radio readout (tap = direct tune) — the space mockup's
-        // tuner panel: inset panel tone, mono accent frequency.
-        LinearLayout readout = Ui.column(act);
-        readout.setBackground(Ui.roundedStroke(act, Ui.PANEL, 14, Ui.LINE));
-        readout.setPadding(pad, Ui.dp(act, 10), pad, Ui.dp(act, 12));
+        // ---- the radio body: one rounded panel holding the
+        // display, the knob, the status strip, the grille, and
+        // the talk button. It takes the remaining page height;
+        // the grille inside it absorbs the slack.
+        LinearLayout body = new LinearLayout(act);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setBackground(Ui.roundedStroke(act, Ui.SURFACE, 18, Ui.LINE));
+        body.setPadding(pad, Ui.dp(act, WalkieLayout.BODY_PAD_TOP_DP),
+                pad, Ui.dp(act, WalkieLayout.BODY_PAD_BOTTOM_DP));
+
+        // The display window (tap = direct tune): the channel
+        // number, the frequency, the label + Open/Private tag,
+        // and below them the indicators row — road/signal, mode,
+        // and the unplayed count for the tuned channel.
+        LinearLayout display = Ui.column(act);
+        display.setBackground(Ui.roundedStroke(act, Ui.PANEL, 12, Ui.LINE));
+        display.setPadding(pad, Ui.dp(act, 6), pad, Ui.dp(act, 6));
         LinearLayout readoutRow = Ui.row(act);
-        bigNumber = Ui.text(act, "1", 64, Ui.TEXT);
+        bigNumber = Ui.text(act, "1", 34, Ui.TEXT);
         Ui.display(bigNumber);
         readoutRow.addView(bigNumber);
         LinearLayout readoutSide = Ui.column(act);
         readoutSide.setBackgroundColor(0x00000000);
-        readoutSide.setPadding(Ui.dp(act, 14), Ui.dp(act, 10), 0, 0);
-        readoutFreq = Ui.text(act, "", 18, Ui.ACCENT);
+        readoutSide.setPadding(Ui.dp(act, 10), 0, 0, 0);
+        readoutFreq = Ui.text(act, "", 15, Ui.ACCENT);
         readoutFreq.setTypeface(android.graphics.Typeface.MONOSPACE);
         readoutSide.addView(readoutFreq);
-        readoutLabel = Ui.text(act, "", 16, Ui.TEXT);
+        readoutLabel = Ui.text(act, "", 14, Ui.TEXT);
+        readoutLabel.setSingleLine(true);
+        readoutLabel.setEllipsize(TextUtils.TruncateAt.END);
         readoutSide.addView(readoutLabel);
         readoutRow.addView(readoutSide);
-        readout.addView(readoutRow);
-        modeLine = Ui.text(act, "", 13, Ui.DIM);
-        readout.addView(modeLine);
-        readout.setOnClickListener(v -> directTuneDialog());
-        root.addView(readout, Ui.wrap(0, 10, 0, 0, act));
+        display.addView(readoutRow);
+        LinearLayout indicatorRow = Ui.row(act);
+        roadText = Ui.text(act, "", 12, Ui.DIM);
+        roadText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        roadText.setSingleLine(true);
+        roadText.setEllipsize(TextUtils.TruncateAt.END);
+        indicatorRow.addView(roadText, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        modeText = Ui.text(act, "", 12, Ui.ACCENT);
+        modeText.setSingleLine(true);
+        modeText.setPadding(Ui.dp(act, 8), 0, 0, 0);
+        indicatorRow.addView(modeText);
+        badgeText = Ui.text(act, "", 12, Ui.SIGNAL);
+        badgeText.setSingleLine(true);
+        badgeText.setPadding(Ui.dp(act, 8), 0, 0, 0);
+        badgeText.setVisibility(GONE);
+        indicatorRow.addView(badgeText);
+        display.addView(indicatorRow, Ui.wrap(0, 2, 0, 0, act));
+        display.setOnClickListener(v -> directTuneDialog());
+        body.addView(display);
 
+        // The channel knob: CH − / CH + flanking the knurled
+        // tuner band. Drag the band to sweep (detents + haptics,
+        // as always); the buttons step one channel at a time.
+        LinearLayout knobRow = Ui.row(act);
+        Button down = compactButton("CH −");
+        down.setOnClickListener(v -> step(-1));
+        knobRow.addView(down);
         tuner = new TunerView(act);
         tuner.setOnTuneListener(new TunerView.OnTuneListener() {
             @Override public void onPreview(int channel) {
@@ -410,36 +793,209 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 if (channel != channelNumber) bindChannel(channel);
             }
         });
-        root.addView(tuner, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(act, 84)));
-        TextView tunerHint = Ui.text(act,
-                "Drag the band to tune. The frequency is the channel's radio "
-                + "identity — your voice itself travels over the data roads below.", 11, Ui.DIM);
-        tunerHint.setGravity(Gravity.CENTER);
-        root.addView(tunerHint);
-
-        LinearLayout stepRow = Ui.row(act);
-        Button down = Ui.smallButton(act, "CH −");
-        down.setOnClickListener(v -> step(-1));
-        Button up = Ui.smallButton(act, "CH +");
+        tunerAnchor = tuner;
+        knobRow.addView(tuner, new LinearLayout.LayoutParams(
+                0, Ui.dp(act, WalkieLayout.KNOB_DP), 1f));
+        Button up = compactButton("CH +");
         up.setOnClickListener(v -> step(1));
-        scanButton = Ui.smallButton(act, "Scan");
+        knobRow.addView(up);
+        body.addView(knobRow, Ui.wrap(0, 4, 0, 0, act));
+
+        // Status strip: one small line each, ellipsized — the
+        // fixed layout needs the strip bounded (see WalkieLayout).
+        // Empty lines collapse to zero height, as before. Every
+        // setter in the transports keeps writing these same
+        // views; only their size and home changed.
+        statusText = Ui.text(act, "", 12, Ui.DIM);
+        statusText.setSingleLine(true);
+        statusText.setEllipsize(TextUtils.TruncateAt.END);
+        body.addView(statusText, Ui.wrap(0, 6, 0, 0, act));
+        talkerText = Ui.text(act, "", 12, Ui.ACCENT);
+        talkerText.setSingleLine(true);
+        talkerText.setEllipsize(TextUtils.TruncateAt.END);
+        body.addView(talkerText);
+        membersText = Ui.text(act, "", 12, Ui.DIM);
+        membersText.setSingleLine(true);
+        membersText.setEllipsize(TextUtils.TruncateAt.END);
+        body.addView(membersText);
+
+        // The speaker grille: drawn slots, flexible height — it
+        // absorbs the slack on tall screens (its pattern stays
+        // centered), down to the floor WalkieLayout pins.
+        SpeakerGrilleView grille = new SpeakerGrilleView(act);
+        grille.setMinimumHeight(Ui.dp(act, WalkieLayout.GRILLE_MIN_DP));
+        body.addView(grille, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Push-to-talk — the dominant control on the face: the
+        // large disc, dark green with the lighter ring; held →
+        // accent fill. Same states and labels as always.
+        LinearLayout pttWrap = new LinearLayout(act);
+        pttWrap.setGravity(Gravity.CENTER);
+        pttButton = new Button(act);
+        pttAnchor = pttButton;
+        pttButton.setText("HOLD TO\nTALK");
+        pttButton.setTextSize(16);
+        pttButton.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+        pttButton.setLetterSpacing(0.12f);
+        pttButton.setTextColor(Ui.ACCENT);
+        pttButton.setBackground(pttDrawable(false));
+        int pttSide = Ui.dp(act, WalkieLayout.PTT_SIDE_DP);
+        pttWrap.addView(pttButton, new LinearLayout.LayoutParams(pttSide, pttSide));
+        pttButton.setOnTouchListener((v, e) -> {
+            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                if (lowDataOn()) startLowDataSpurt(); else startSpurt();
+            }
+            if (e.getAction() == MotionEvent.ACTION_UP
+                    || e.getAction() == MotionEvent.ACTION_CANCEL) stopSpurt();
+            return true;
+        });
+        body.addView(pttWrap, Ui.wrap(0, 8, 0, 0, act));
+        addView(body, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Access row: the messages panel, the radio menu, and
+        // Scan — everything the face hides is one tap away.
+        LinearLayout accessRow = Ui.row(act);
+        messagesButton = compactButton("Messages");
+        messagesButton.setOnClickListener(v -> showPanelDialog(
+                "Channel " + channelNumber + " messages",
+                messagesPanelView, false));
+        accessRow.addView(messagesButton);
+        Button menuBtn = compactButton("Menu");
+        menuBtn.setOnClickListener(v -> showPanelDialog(
+                "Radio menu", menuPanelView, true));
+        accessRow.addView(menuBtn);
+        scanButton = compactButton("Scan");
         scanButton.setOnClickListener(v -> {
             if (scanning) stopScan(); else startScan();
         });
-        stepRow.addView(down);
-        stepRow.addView(up);
-        stepRow.addView(scanButton);
-        root.addView(stepRow);
+        accessRow.addView(scanButton);
+        addView(accessRow, Ui.wrap(0, 6, 0, 0, act));
 
-        // First-class private-channel flow, right on the radio: make
-        // this channel private (or play its join sound), and listen
-        // for an invite without leaving the page.
+        // The panels live in the hidden holder between dialog
+        // openings; GONE, so the holder measures nothing.
+        panelHolder = Ui.column(act);
+        panelHolder.setVisibility(GONE);
+        messagesPanelView = messagesPanel();
+        menuPanelView = menuPanel();
+        panelHolder.addView(messagesPanelView);
+        panelHolder.addView(menuPanelView);
+        addView(panelHolder);
+
+        // The hidden holder owns the road sections between dialog
+        // openings; GONE, so it measures nothing.
+        sectionHolder = Ui.column(act);
+        sectionHolder.setVisibility(GONE);
+        localSectionView = localSection();
+        internetSectionView = internetSection();
+        bluetoothSectionView = bluetoothSection();
+        sectionHolder.addView(localSectionView);
+        sectionHolder.addView(internetSectionView);
+        sectionHolder.addView(bluetoothSectionView);
+        addView(sectionHolder);
+    }
+
+    /** The messages panel (v1.23): the thread region + the
+     *  composer, built once and shown in a dialog from the
+     *  access row. The thread list is the ONLY scrolling region
+     *  in the panel; the empty hint overlays its top and the
+     *  join-sound block overlays its bottom on private
+     *  channels, exactly as on the v1.20 page — the list pads
+     *  its scrollable bottom by the block's height (see
+     *  refreshPlayBlock) so no message hides under it. The
+     *  panel is fixed-height so the list has room to scroll;
+     *  the dialog clamps it on short screens. History rides in
+     *  the composer row, naming its count, as since v1.18. */
+    private View messagesPanel() {
+        LinearLayout panel = Ui.column(act);
+        panel.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(act, 480)));
+        FrameLayout threadRegion = new FrameLayout(act);
+        threadList = new ListView(act);
+        threadList.setDivider(null);
+        threadList.setClipToPadding(false);
+        threadAdapter = new ThreadAdapter();
+        historyAdapter = new HistoryAdapter();
+        threadList.setAdapter(threadAdapter);
+        threadList.setOnItemClickListener((p, v, pos, id) -> {
+            JSONObject entry = threadEntries.get(pos);
+            if ("voice".equals(entry.optString("kind"))) {
+                playEntry(entry);
+            } else if (!entry.optBoolean("mine")) {
+                // Any received text replays aloud in the sender's
+                // voice profile; own messages never speak.
+                replayEntry(entry);
+            }
+        });
+        threadList.setOnItemLongClickListener((p, v, pos, id) -> {
+            showEntryMenu(v, threadEntries.get(pos));
+            return true;
+        });
+        threadRegion.addView(threadList,
+                new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+        threadEmptyHint = Ui.text(act,
+                "Nothing unplayed here. Messages you have heard are in History.",
+                13, Ui.DIM);
+        threadEmptyHint.setVisibility(GONE);
+        threadRegion.addView(threadEmptyHint,
+                new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.START));
+        threadRegion.addView(playBlock,
+                new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM));
+        panel.addView(threadRegion, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        LinearLayout composeRow = Ui.row(act);
+        historyButton = compactButton("History");
+        historyButton.setOnClickListener(v -> showHistoryDialog());
+        composeRow.addView(historyButton);
+        composer = Ui.input(act, "Text this channel…");
+        composer.setPadding(Ui.dp(act, 12), Ui.dp(act, 8),
+                Ui.dp(act, 12), Ui.dp(act, 8));
+        composeRow.addView(composer, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button send = Ui.button(act, "Send", true);
+        send.setMinHeight(Ui.dp(act, 38));
+        send.setOnClickListener(v -> {
+            String text = composer.getText().toString().trim();
+            if (text.isEmpty()) return;
+            composer.setText("");
+            sendChannelText(text);
+        });
+        composeRow.addView(send);
+        panel.addView(composeRow, Ui.wrap(0, 2, 0, 0, act));
+        return panel;
+    }
+
+    /** The radio menu (v1.23): the send-mode choice, read-aloud,
+     *  background listening, the private-channel flow, and the
+     *  roads — everything the face hides, one tap away, with
+     *  every section's copy and controls intact. Built once
+     *  and shown in a scrolling dialog from the access row. */
+    private View menuPanel() {
+        LinearLayout panel = Ui.column(act);
+        panel.setBackgroundColor(0x00000000);
+        panel.addView(modeSection());
+        panel.addView(readAloudSection());
+        panel.addView(subscriptionSection());
+        panel.addView(bridgeSection());
+
+        // First-class private-channel flow: make this channel
+        // private (or play its join sound), and listen for an
+        // invite without leaving the radio.
         LinearLayout actionRow = Ui.row(act);
-        channelActionBtn = Ui.smallButton(act, "Make this channel private");
+        channelActionBtn = compactButton("Make this channel private");
         channelActionBtn.setOnClickListener(v -> onChannelAction());
         actionRow.addView(channelActionBtn);
-        Button listenInviteBtn = Ui.smallButton(act, "Listen for invite");
+        Button listenInviteBtn = compactButton("Listen for invite");
         listenInviteBtn.setOnClickListener(v -> {
             if (act instanceof MainActivity) {
                 act.startActivityForResult(
@@ -450,98 +1006,25 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             }
         });
         actionRow.addView(listenInviteBtn);
-        root.addView(actionRow, Ui.wrap(0, 8, 0, 0, act));
+        panel.addView(actionRow, Ui.wrap(0, 2, 0, 0, act));
 
-        statusText = Ui.body(act, "");
-        root.addView(statusText, Ui.wrap(0, 10, 0, 0, act));
-        talkerText = Ui.text(act, "", 15, Ui.ACCENT);
-        root.addView(talkerText);
-        membersText = Ui.body(act, "");
-        root.addView(membersText);
-
-        // Push-to-talk — the mockup's round button: dark green disc,
-        // lighter ring, mono accent label; held → accent fill.
-        LinearLayout pttWrap = new LinearLayout(act);
-        pttWrap.setGravity(Gravity.CENTER);
-        pttButton = new Button(act);
-        pttAnchor = pttButton;
-        pttButton.setText("HOLD TO\nTALK");
-        pttButton.setTextSize(15);
-        pttButton.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
-        pttButton.setLetterSpacing(0.12f);
-        pttButton.setTextColor(Ui.ACCENT);
-        pttButton.setBackground(pttDrawable(false));
-        int pttSide = Ui.dp(act, 148);
-        pttWrap.addView(pttButton, new LinearLayout.LayoutParams(pttSide, pttSide));
-        pttButton.setOnTouchListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_DOWN) {
-                if (lowDataOn()) startLowDataSpurt(); else startSpurt();
-            }
-            if (e.getAction() == MotionEvent.ACTION_UP
-                    || e.getAction() == MotionEvent.ACTION_CANCEL) stopSpurt();
-            return true;
-        });
-        root.addView(pttWrap, Ui.wrap(0, 10, 0, 0, act));
-
-        root.addView(lowDataSection());
-        root.addView(readAloudSection());
-
-        // v1.18: History lives one tap above the thread. The
-        // button names the count so the thread's shrinking is
-        // never a mystery; the hint under it says what the thread
-        // holds now (unplayed messages only) without ever claiming
-        // a message was heard when it wasn't.
-        historyButton = Ui.smallButton(act, "History");
-        historyButton.setOnClickListener(v -> showHistoryDialog());
-        root.addView(historyButton, Ui.wrap(0, 8, 0, 0, act));
-        threadEmptyHint = Ui.text(act,
-                "Nothing unplayed here. Messages you have heard are in History.",
-                13, Ui.DIM);
-        threadEmptyHint.setVisibility(GONE);
-        root.addView(threadEmptyHint, Ui.wrap(0, 2, 0, 0, act));
-
-        ListView thread = new ListView(act);
-        threadAnchor = thread;
-        thread.setDivider(null);
-        threadAdapter = new ThreadAdapter();
-        historyAdapter = new HistoryAdapter();
-        thread.setAdapter(threadAdapter);
-        thread.setOnItemClickListener((p, v, pos, id) -> {
-            JSONObject entry = threadEntries.get(pos);
-            if ("voice".equals(entry.optString("kind"))) {
-                playEntry(entry);
-            } else if (!entry.optBoolean("mine")) {
-                // Any received text replays aloud in the sender's
-                // voice profile; own messages never speak.
-                replayEntry(entry);
-            }
-        });
-        thread.setOnItemLongClickListener((p, v, pos, id) -> {
-            showEntryInfo(threadEntries.get(pos));
-            return true;
-        });
-        root.addView(thread, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(act, 220)));
-
-        LinearLayout composeRow = Ui.row(act);
-        composer = Ui.input(act, "Text this channel…");
-        composerAnchor = composer;
-        composeRow.addView(composer, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button send = Ui.button(act, "Send", true);
-        send.setOnClickListener(v -> {
-            String text = composer.getText().toString().trim();
-            if (text.isEmpty()) return;
-            composer.setText("");
-            sendChannelText(text);
-        });
-        composeRow.addView(send);
-        root.addView(composeRow, Ui.wrap(0, 8, 0, 0, act));
-
-        root.addView(localSection());
-        root.addView(internetSection());
-        root.addView(subscriptionSection());
-        root.addView(bluetoothSection());
+        // The road sections live in their own dialogs (one tap
+        // away, full copy and controls intact), as since v1.20.
+        LinearLayout roadsRow = Ui.row(act);
+        Button meshBtn = compactButton("Mesh & LAN");
+        meshBtn.setOnClickListener(v -> showRoadSection(
+                "Nearby mesh & LAN", localSectionView));
+        roadsRow.addView(meshBtn);
+        Button netBtn = compactButton("Internet");
+        netBtn.setOnClickListener(v -> showRoadSection(
+                "Internet", internetSectionView));
+        roadsRow.addView(netBtn);
+        Button btBtn = compactButton("Bluetooth");
+        btBtn.setOnClickListener(v -> showRoadSection(
+                "Bluetooth", bluetoothSectionView));
+        roadsRow.addView(btBtn);
+        panel.addView(roadsRow, Ui.wrap(0, 2, 0, 0, act));
+        return panel;
     }
 
     private View localSection() {
@@ -570,6 +1053,23 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         row2.addView(lanHost);
         row2.addView(stop);
         box.addView(row2);
+        // Sound sharing (v1.26): the host plays the mesh's join
+        // instructions; a nearby phone listens and joins the
+        // named mesh without the manual tap dance.
+        LinearLayout row3 = Ui.row(act);
+        Button shareMesh = Ui.smallButton(act, "Share mesh by sound");
+        shareMesh.setOnClickListener(v -> shareMeshBySound());
+        Button joinSound = Ui.smallButton(act, "Join by sound");
+        joinSound.setOnClickListener(v -> {
+            if (act instanceof MainActivity) {
+                act.startActivityForResult(
+                        AudioKeyListenActivity.meshIntent(act),
+                        MainActivity.REQ_WALKIE_LISTEN);
+            }
+        });
+        row3.addView(shareMesh);
+        row3.addView(joinSound);
+        box.addView(row3);
         return box;
     }
 
@@ -598,26 +1098,16 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private View subscriptionSection() {
         LinearLayout box = Ui.column(act);
         box.setBackgroundColor(0x00000000);
-        box.addView(Ui.sectionLabel(act, "Listen in the background"));
-        box.addView(Ui.body(act,
-                "Keep listening to this channel over the internet "
-                + "relay, even when you're tuned elsewhere. Messages "
-                + "arrive in this channel's thread and are read aloud, "
-                + "just as if you were tuned here. Each subscribed "
-                + "channel is checked every few seconds — more "
-                + "subscriptions means each one is checked less often "
-                + "— and background listening uses a little mobile "
-                + "data and battery. Quiet silences the read-aloud, "
-                + "as always. The mesh and Bluetooth roads are not "
-                + "affected: they only ever hear the tuned channel."));
         subscribeSwitch = new Switch(act);
+        subscribeSwitch.setText("Listen in the background");
         subscribeSwitch.setTextColor(Ui.TEXT);
-        subscribeSwitch.setTextSize(15);
-        subscribeSwitch.setPadding(0, Ui.dp(act, 8), 0, Ui.dp(act, 2));
+        subscribeSwitch.setTextSize(14);
+        subscribeSwitch.setPadding(0, Ui.dp(act, 2), 0, Ui.dp(act, 2));
         subscribeSwitch.setOnCheckedChangeListener((b, on) -> onSubscribeToggled(on));
-        box.addView(subscribeSwitch);
-        subscribeState = Ui.text(act, "", 13, Ui.DIM);
-        box.addView(subscribeState);
+        subscribeState = Ui.text(act, "", 12, Ui.DIM);
+        subscribeState.setOnClickListener(v -> showSwitchInfo(
+                "Listen in the background", SUBSCRIBE_BODY, subscribeStateFull));
+        box.addView(switchRow(subscribeSwitch, subscribeState));
         refreshSubscriptionSection();
         return box;
     }
@@ -625,13 +1115,17 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private void refreshSubscriptionSection() {
         if (subscribeSwitch == null || subscribeState == null) return;
         subscribeSwitch.setOnCheckedChangeListener(null);
-        subscribeSwitch.setText("Listen to channel " + channelNumber
-                + " in the background");
         subscribeSwitch.setChecked(
                 ChannelSubscriptions.isSubscribed(act, channelNumber));
         subscribeSwitch.setOnCheckedChangeListener(
                 (b, on) -> onSubscribeToggled(on));
-        subscribeState.setText(subscriptionStateLine());
+        // The channel number rides in the status line now (the
+        // switch text is fixed); the full line is one tap away in
+        // the info dialog, so a blocker is never truncated into a
+        // mystery.
+        subscribeStateFull = "Channel " + channelNumber + " — "
+                + subscriptionStateLine();
+        subscribeState.setText(subscribeStateFull + " ⓘ");
     }
 
     /** One honest line about this channel's background
@@ -689,6 +1183,48 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         refreshSubscriptionSection();
     }
 
+    /** Cross-transport bridging (v1.24): one switch, default
+     *  ON, in the radio menu. Off means exactly the pre-v1.24
+     *  behavior — each road hears only its own traffic. */
+    private View bridgeSection() {
+        LinearLayout box = Ui.column(act);
+        box.setBackgroundColor(0x00000000);
+        bridgeSwitch = new Switch(act);
+        bridgeSwitch.setText("Bridge messages across transports");
+        bridgeSwitch.setTextColor(Ui.TEXT);
+        bridgeSwitch.setTextSize(14);
+        bridgeSwitch.setPadding(0, Ui.dp(act, 2), 0, Ui.dp(act, 2));
+        bridgeSwitch.setOnCheckedChangeListener((b, on) -> onBridgeToggled(on));
+        bridgeState = Ui.text(act, "", 12, Ui.DIM);
+        bridgeState.setOnClickListener(v -> showSwitchInfo(
+                "Bridge messages across transports", BRIDGE_BODY, bridgeStateFull));
+        box.addView(switchRow(bridgeSwitch, bridgeState));
+        refreshBridgeSection();
+        return box;
+    }
+
+    private void refreshBridgeSection() {
+        if (bridgeSwitch == null || bridgeState == null) return;
+        bridgeSwitch.setOnCheckedChangeListener(null);
+        bridgeSwitch.setChecked(bridgingOn());
+        bridgeSwitch.setOnCheckedChangeListener((b, on) -> onBridgeToggled(on));
+        bridgeStateFull = bridgingOn()
+                ? "Messages pass live between the mesh, Bluetooth, "
+                + "and the internet relay. Nothing is stored for later."
+                : "Bridging off — each road stays separate, as before.";
+        bridgeState.setText(bridgeStateFull + " ⓘ");
+    }
+
+    private void onBridgeToggled(boolean on) {
+        Prefs.get(act).edit().putBoolean(Prefs.KEY_BRIDGE_ON, on).apply();
+        refreshBridgeSection();
+    }
+
+    /** The bridging switch, default ON. */
+    private boolean bridgingOn() {
+        return Prefs.get(act).getBoolean(Prefs.KEY_BRIDGE_ON, true);
+    }
+
     /** The "All channels" button carries the count of unplayed
      *  messages waiting on OTHER channels, so a background
      *  arrival is findable from this page without opening the
@@ -717,37 +1253,169 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         return box;
     }
 
-    // ------------------------------------------------------------ low-data mode (v1.11)
+    // ------------------------------------------------------------ send mode (v1.11 low-data, v1.23 auto)
 
+    /** The mode in force is TEXT exactly when hold-to-talk
+     *  transcribes instead of sending voice. This is the single
+     *  seam between the mode decision and the existing
+     *  low-data path (PTT dispatch, the model block, the
+     *  transcription dialog) — everything downstream is
+     *  unchanged. */
     private boolean lowDataOn() {
-        return Prefs.get(act).getBoolean(Prefs.KEY_LOWDATA_ON, false);
+        return effectiveMode == WalkieMode.Mode.TEXT;
     }
 
-    private View lowDataSection() {
+    /** The stored choice. No stored value means AUTO (v1.24
+     *  default); a stored value is the user's explicit pick.
+     *  This never writes: no implicit choice is ever stored,
+     *  and the v1.23 one-time migration from the old low-data
+     *  switch is gone. */
+    private WalkieMode.Choice modeChoice() {
+        return WalkieMode.parseChoice(
+                Prefs.get(act).getString(Prefs.KEY_WALKIE_MODE, null));
+    }
+
+    private void setModeChoice(WalkieMode.Choice c) {
+        Prefs.get(act).edit()
+                .putString(Prefs.KEY_WALKIE_MODE, WalkieMode.storeChoice(c))
+                .apply();
+        applyModeDecision();
+        // Choosing Auto tests the connection right away instead
+        // of waiting for the next idle tick.
+        if (c == WalkieMode.Choice.AUTO) maybeProbe();
+    }
+
+    /** Recomputes the effective mode from the choice, the live
+     *  sessions, and the last probe; syncs the old low-data
+     *  key with the mode in force; refreshes every surface
+     *  that names the mode. */
+    private void applyModeDecision() {
+        effectiveMode = WalkieMode.decide(modeChoice(), effectiveMode,
+                localSessionLive(), lastProbe, lastRttMs);
+        Prefs.get(act).edit()
+                .putBoolean(Prefs.KEY_LOWDATA_ON, lowDataOn()).apply();
+        refreshModeLine();
+        refreshFaceIndicators();
+        refreshModeSection();
+    }
+
+    private boolean localSessionLive() {
+        return meshLive || btLive;
+    }
+
+    /** The idle re-test: once a minute while the page is shown.
+     *  Started in onPageShown, stopped in onPageHidden. */
+    private final Runnable probeTick = new Runnable() {
+        @Override public void run() {
+            maybeProbe();
+            ui.postDelayed(this, WalkieMode.PROBE_INTERVAL_MS);
+        }
+    };
+
+    /** Runs one speed probe when Auto is in force, no local
+     *  session is live (a nearby link decides the mode by
+     *  itself, with no probe), and no transmission is in
+     *  progress. Single-flight: a probe already running is
+     *  never doubled. A failed probe keeps the last decision
+     *  and the face says the relay is unreachable. */
+    private void maybeProbe() {
+        if (pageDead) return;
+        if (modeChoice() != WalkieMode.Choice.AUTO) return;
+        if (localSessionLive()) {
+            applyModeDecision();
+            return;
+        }
+        if (recording || transcribing || probing) return;
+        probing = true;
+        RelayClient.probe(act, new RelayClient.Cb<Long>() {
+            @Override public void ok(Long ms) {
+                probing = false;
+                lastProbe = WalkieMode.Probe.OK;
+                lastRttMs = ms;
+                applyModeDecision();
+            }
+
+            @Override public void err(String code, String message) {
+                probing = false;
+                lastProbe = WalkieMode.Probe.FAILED;
+                applyModeDecision();
+            }
+        });
+    }
+
+    /** The mode line on the radio face: the choice, what the
+     *  probe measured (or that it measured nothing), and the
+     *  mode in force — worded by WalkieMode, so the harness
+     *  proves the exact text. */
+    private void refreshModeLine() {
+        if (modeText == null) return;
+        modeText.setText(WalkieMode.describe(modeChoice(), effectiveMode,
+                lastProbe, lastRttMs, localSessionLive(),
+                !SpeechTranscriber.isModelReady(act)));
+    }
+
+    /** The display window's road/signal line and the unplayed
+     *  count: the live local session when one exists (with its
+     *  member count or peer), else the relay's reachability
+     *  from the last probe, else the plain Internet road. The
+     *  badge counts unplayed RECEIVED messages on the tuned
+     *  channel; the Messages button carries the same count. */
+    private void refreshFaceIndicators() {
+        if (roadText == null) return;
+        String road;
+        if (meshLive) {
+            road = sessionRoad + (lastMemberCount > 0
+                    ? " · " + lastMemberCount + " nearby" : " · open");
+        } else if (btLive) {
+            road = "Bluetooth" + (lastBtPeer.isEmpty() ? "" : " · " + lastBtPeer);
+        } else if (lastProbe == WalkieMode.Probe.FAILED) {
+            road = "Relay unreachable";
+        } else {
+            road = "Internet";
+        }
+        roadText.setText(WalkieMode.signalText(lastProbe, lastRttMs,
+                localSessionLive()) + " " + road);
+        int unplayed = 0;
+        for (JSONObject e : threadEntries) {
+            if (!e.optBoolean("mine")) unplayed++;
+        }
+        if (unplayed > 0) {
+            badgeText.setText(unplayed + " new");
+            badgeText.setVisibility(VISIBLE);
+        } else {
+            badgeText.setVisibility(GONE);
+        }
+        if (messagesButton != null) {
+            messagesButton.setText(unplayed > 0
+                    ? "Messages (" + unplayed + ")" : "Messages");
+        }
+    }
+
+    /** The send-mode section in the radio menu: the three-way
+     *  choice (Auto / Voice / Text) with the mode's status
+     *  line and the speech-model block. The old low-data
+     *  switch is the Text choice; its explanation survives
+     *  verbatim in the info dialog behind the status line. */
+    private View modeSection() {
         LinearLayout box = Ui.column(act);
         box.setBackgroundColor(0x00000000);
-        box.addView(Ui.sectionLabel(act, "Low-data mode"));
-        box.addView(Ui.body(act,
-                "Sends text instead of audio. You talk, this phone "
-                + "transcribes your words on-device, and you check them "
-                + "before anything is sent. The other phone reads the "
-                + "text aloud in a synthetic voice profile you choose per "
-                + "contact — recognizable, but not their real voice. "
-                + "Transcription works fully offline once the speech "
-                + "model is downloaded."));
-        lowDataSwitch = new Switch(act);
-        lowDataSwitch.setText("Low-data mode");
-        lowDataSwitch.setTextColor(Ui.TEXT);
-        lowDataSwitch.setTextSize(15);
-        lowDataSwitch.setPadding(0, Ui.dp(act, 8), 0, Ui.dp(act, 2));
-        lowDataSwitch.setChecked(lowDataOn());
-        lowDataSwitch.setOnCheckedChangeListener((b, on) -> onLowDataToggled(on));
-        box.addView(lowDataSwitch);
-        lowDataStatus = Ui.text(act, "", 13, Ui.DIM);
-        box.addView(lowDataStatus);
+        LinearLayout row = Ui.row(act);
+        row.addView(Ui.text(act, "Send mode", 14, Ui.TEXT));
+        modeAutoBtn = modeButton("Auto", WalkieMode.Choice.AUTO);
+        modeVoiceBtn = modeButton("Voice", WalkieMode.Choice.VOICE);
+        modeTextBtn = modeButton("Text", WalkieMode.Choice.TEXT);
+        row.addView(modeAutoBtn);
+        row.addView(modeVoiceBtn);
+        row.addView(modeTextBtn);
+        box.addView(row);
+        lowDataStatus = Ui.text(act, "", 12, Ui.DIM);
+        lowDataStatus.setOnClickListener(v -> showSwitchInfo(
+                "Low-data mode", LOW_DATA_BODY, lowDataStatusFull));
+        box.addView(lowDataStatus, Ui.wrap(0, 2, 0, 0, act));
 
-        // Speech-model block: shown when the mode is wanted but the
-        // model isn't on the phone yet, and while downloading.
+        // Speech-model block: shown when the mode in force is
+        // TEXT but the model isn't on the phone yet, and while
+        // downloading.
         modelBlock = Ui.column(act);
         modelBlock.setBackgroundColor(0x00000000);
         modelStatus = Ui.text(act, "", 13, Ui.SIGNAL);
@@ -765,8 +1433,37 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         modelBlock.addView(modelButton, Ui.wrap(0, 6, 0, 0, act));
         box.addView(modelBlock);
 
-        refreshLowDataBlock();
+        refreshModeSection();
         return box;
+    }
+
+    private Button modeButton(String label, final WalkieMode.Choice choice) {
+        Button b = compactButton(label);
+        b.setOnClickListener(v -> setModeChoice(choice));
+        return b;
+    }
+
+    /** Highlights the chosen mode button (accent fill) and
+     *  rests the others (the plain compact style). */
+    private void refreshModeButtons() {
+        WalkieMode.Choice c = modeChoice();
+        styleModeButton(modeAutoBtn, c == WalkieMode.Choice.AUTO);
+        styleModeButton(modeVoiceBtn, c == WalkieMode.Choice.VOICE);
+        styleModeButton(modeTextBtn, c == WalkieMode.Choice.TEXT);
+    }
+
+    private void styleModeButton(Button b, boolean selected) {
+        if (b == null) return;
+        if (selected) {
+            b.setBackground(Ui.rounded(act, Ui.ACCENT, 9));
+            b.setTextColor(Ui.ACCENT_INK);
+            b.setTypeface(android.graphics.Typeface.create(
+                    "sans-serif", android.graphics.Typeface.BOLD));
+        } else {
+            b.setBackground(Ui.roundedStroke(act, Ui.SURFACE, 9, Ui.LINE));
+            b.setTextColor(Ui.TEXT);
+            b.setTypeface(android.graphics.Typeface.MONOSPACE);
+        }
     }
 
     /** Read-aloud (v1.17): one switch for every received walkie
@@ -782,43 +1479,61 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     private View readAloudSection() {
         LinearLayout box = Ui.column(act);
         box.setBackgroundColor(0x00000000);
-        box.addView(Ui.sectionLabel(act, "Read aloud"));
-        box.addView(Ui.body(act,
-                "Every text this phone receives in a walkie channel is "
-                + "read aloud in the sender's voice profile — a synthetic "
-                + "voice you choose per contact, recognizable, but not "
-                + "their real voice."));
         autoReadSwitch = new Switch(act);
         autoReadSwitch.setText("Read walkie messages aloud");
         autoReadSwitch.setTextColor(Ui.TEXT);
-        autoReadSwitch.setTextSize(15);
-        autoReadSwitch.setPadding(0, Ui.dp(act, 8), 0, Ui.dp(act, 2));
+        autoReadSwitch.setTextSize(14);
+        autoReadSwitch.setPadding(0, Ui.dp(act, 2), 0, Ui.dp(act, 2));
         autoReadSwitch.setChecked(
                 Prefs.get(act).getBoolean(Prefs.KEY_LOWDATA_AUTOREAD, true));
-        autoReadSwitch.setOnCheckedChangeListener((b, on) -> Prefs.get(act).edit()
-                .putBoolean(Prefs.KEY_LOWDATA_AUTOREAD, on).apply());
-        box.addView(autoReadSwitch);
-        box.addView(Ui.text(act, "Never speaks while Quiet is on.", 13, Ui.DIM));
+        autoReadSwitch.setOnCheckedChangeListener((b, on) -> {
+            Prefs.get(act).edit()
+                    .putBoolean(Prefs.KEY_LOWDATA_AUTOREAD, on).apply();
+            updateReadAloudStatus();
+        });
+        readAloudStatus = Ui.text(act, "", 12, Ui.DIM);
+        readAloudStatus.setOnClickListener(v -> showSwitchInfo(
+                "Read aloud", READ_ALOUD_BODY, readAloudStatusFull));
+        box.addView(switchRow(autoReadSwitch, readAloudStatus));
+        updateReadAloudStatus();
         return box;
     }
 
-    private void refreshLowDataBlock() {
-        if (lowDataSwitch == null) return;
-        boolean on = lowDataOn();
+    private void updateReadAloudStatus() {
+        if (readAloudStatus == null) return;
+        boolean on = Prefs.get(act).getBoolean(Prefs.KEY_LOWDATA_AUTOREAD, true);
+        readAloudStatusFull = on
+                ? "On — never speaks while Quiet is on."
+                : "Off.";
+        readAloudStatus.setText(readAloudStatusFull + " ⓘ");
+    }
+
+    /** The mode section's status line + model block, from the
+     *  choice and the mode in force. The model block shows
+     *  exactly when TEXT is in force but the model is missing
+     *  — the state where hold-to-talk is paused. */
+    private void refreshModeSection() {
+        if (lowDataStatus == null) return;
+        refreshModeButtons();
+        WalkieMode.Choice c = modeChoice();
+        boolean textMode = lowDataOn();
         boolean ready = SpeechTranscriber.isModelReady(act);
-        lowDataSwitch.setChecked(on);
-        if (!on) {
-            lowDataStatus.setText("Off — hold to talk sends voice bursts as usual.");
-            modelBlock.setVisibility(GONE);
-            return;
-        }
-        if (ready) {
-            lowDataStatus.setText("On — hold to talk, then check the words "
-                    + "before sending. Only the text goes out.");
-            modelBlock.setVisibility(GONE);
+        if (c == WalkieMode.Choice.AUTO) {
+            lowDataStatusFull = "Auto — the connection speed is "
+                    + "tested and the mode follows it. Now: "
+                    + (textMode ? "Text." : "Voice.");
+        } else if (c == WalkieMode.Choice.TEXT) {
+            lowDataStatusFull = ready
+                    ? "Text — hold to talk, then check the words "
+                    + "before sending. Only the text goes out."
+                    : "Text, but the speech model isn't downloaded "
+                    + "yet — hold to talk is paused until it is.";
         } else {
-            lowDataStatus.setText("On, but the speech model isn't downloaded "
-                    + "yet — hold to talk is paused until it is.");
+            lowDataStatusFull = "Voice — hold to talk sends voice "
+                    + "bursts as usual.";
+        }
+        lowDataStatus.setText(lowDataStatusFull + " ⓘ");
+        if (textMode && !ready) {
             modelBlock.setVisibility(VISIBLE);
             if (!downloadingModel) {
                 modelStatus.setText("The speech model is "
@@ -830,12 +1545,9 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                         + SpeechTranscriber.MODEL_DISPLAY_SIZE + ")");
                 modelButton.setEnabled(true);
             }
+        } else {
+            modelBlock.setVisibility(GONE);
         }
-    }
-
-    private void onLowDataToggled(boolean on) {
-        Prefs.get(act).edit().putBoolean(Prefs.KEY_LOWDATA_ON, on).apply();
-        refreshLowDataBlock();
     }
 
     private void onModelButton() {
@@ -863,7 +1575,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 modelStatus.setText("Speech model ready — low-data mode works offline now.");
                 Toast.makeText(act, "Speech model downloaded. Low-data mode is on.",
                         Toast.LENGTH_LONG).show();
-                refreshLowDataBlock();
+                refreshModeSection();
+                refreshModeLine();
             }
 
             @Override public void onError(String reason) {
@@ -883,10 +1596,10 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         bigNumber.setText(String.valueOf(number));
         readoutFreq.setText(TunerView.frequencyText(number));
         String label = s.optString("label", "");
-        readoutLabel.setText(label.isEmpty() ? "—" : label);
-        modeLine.setText(Profile.isPrivate(s)
-                ? "Private — members with the channel key only"
-                : "Open — anyone nearby on channel " + number);
+        // v1.20: the readout is one row — the Open/Private tag rides
+        // in the label line instead of a second row.
+        readoutLabel.setText((label.isEmpty() ? "—" : label)
+                + " · " + (Profile.isPrivate(s) ? "Private" : "Open"));
     }
 
     /**
@@ -939,6 +1652,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         syncRelayMembers();
         refreshSubscriptionSection();
         refreshChannelsButton();
+        refreshFaceIndicators();
+        refreshModeLine();
         tryFlushOutbox();
     }
 
@@ -983,7 +1698,7 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 .setTitle("Make channel " + channelNumber + " private")
                 .setMessage("A channel key is generated on this phone. Only "
                         + "devices with the key can join — and the join sound "
-                        + "plays from the bottom of the radio, ready to "
+                        + "plays from the messages panel, ready to "
                         + "share.")
                 .setView(input)
                 .setNegativeButton("Cancel", null)
@@ -1018,6 +1733,7 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             stopJoinPlay();
             playBlock.setVisibility(GONE);
             playForIdentity = "";
+            refreshThreadBottomPadding();
             return;
         }
         String cacheKey = Profile.slotIdentity(s) + "|" + s.optString("label", "");
@@ -1032,6 +1748,20 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             playForIdentity = cacheKey;
         }
         playBlock.setVisibility(VISIBLE);
+        refreshThreadBottomPadding();
+    }
+
+    /** The join-sound block overlays the bottom of the thread
+     *  region: the list pads its scrollable bottom by the block's
+     *  measured height (clipToPadding is off), so the last message
+     *  scrolls clear of it instead of hiding under it. */
+    private void refreshThreadBottomPadding() {
+        if (threadList == null || playBlock == null) return;
+        threadList.post(() -> {
+            int pad = playBlock.getVisibility() == VISIBLE
+                    ? playBlock.getHeight() + Ui.dp(act, 8) : 0;
+            threadList.setPadding(0, 0, 0, pad);
+        });
     }
 
     /** Tap on the pinned block: play the tuned channel's join sound
@@ -1085,10 +1815,20 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
     }
 
     /** A heard key, delivered by MainActivity (the listen ran under
-     *  the host activity). Joins channel invites; anything else gets
-     *  a plain refusal. */
+     *  the host activity). Joins channel invites and mesh invites;
+     *  anything else gets a plain refusal. */
     public void handleHeardText(String text) {
         if (text == null) return;
+        try {
+            JSONObject obj = new JSONObject(text);
+            if ("control-mesh-join".equals(obj.optString("app", ""))) {
+                handleMeshJoin(obj);
+                return;
+            }
+        } catch (Exception ignored) {
+            // Not JSON — fall through to the invite path, which
+            // refuses it plainly.
+        }
         ChannelInvite.JoinResult r = ChannelInvite.join(act, text);
         if (r == null) {
             Toast.makeText(act, "That sound wasn't a channel invite.",
@@ -1100,6 +1840,166 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             tuner.tuneTo(r.placedNumber, false);
             retune(r.placedNumber);
         }
+    }
+
+    // ---- mesh sharing by sound (v1.26) ----
+
+    /** Plays this phone's mesh join instructions as sound. Only
+     *  while hosting: the packet names the live session — its
+     *  road, the host's reachable address, and the channel
+     *  identity — so the receiver can join without the manual
+     *  tap dance. A phone that is not hosting has no mesh to
+     *  share, and is told so. */
+    private void shareMeshBySound() {
+        if (!meshHost || !meshLive || mesh == null) {
+            Toast.makeText(act, "Host a mesh group or start a LAN "
+                    + "session first, then share it by sound.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if ("LAN".equals(sessionRoad)) {
+            shareMeshLan();
+        } else if (sessionRoad != null && sessionRoad.contains("mesh")) {
+            shareMeshP2p();
+        } else {
+            Toast.makeText(act, "No mesh or LAN session is live to share.",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void shareMeshP2p() {
+        if (!ensureP2p()) return;
+        if (android.os.Build.VERSION.SDK_INT < 29) {
+            Toast.makeText(act, "This phone can't share its mesh by "
+                    + "sound: reading its own Wi-Fi Direct address "
+                    + "needs Android 10 or newer.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        p2p.requestDeviceInfo(p2pChannel, device -> {
+            String addr = device == null ? null : device.deviceAddress;
+            if (addr == null || addr.isEmpty()) {
+                Toast.makeText(act, "Couldn't read this phone's Wi-Fi "
+                        + "Direct address — the mesh sound can't be built.",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            act.startActivity(AudioKeyPlayActivity.meshIntent(act,
+                    AudioKeyPayload.ROAD_P2P, myName(), addr, identity,
+                    Profile.slotDisplayName(slot), Profile.isPrivate(slot)));
+        });
+    }
+
+    private void shareMeshLan() {
+        String addr = ownLanAddress();
+        if (addr == null) {
+            Toast.makeText(act, "Couldn't find this phone's address on "
+                    + "this Wi-Fi network — the mesh sound can't be built.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        act.startActivity(AudioKeyPlayActivity.meshIntent(act,
+                AudioKeyPayload.ROAD_LAN, myName(), addr, identity,
+                Profile.slotDisplayName(slot), Profile.isPrivate(slot)));
+    }
+
+    /** This phone's site-local IPv4 address, or null when none is
+     *  up. Interface enumeration needs no permission and never
+     *  returns a loopback or link-local address. */
+    private static String ownLanAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> ifs =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs.hasMoreElements()) {
+                java.net.NetworkInterface ni = ifs.nextElement();
+                if (!ni.isUp() || ni.isLoopback() || ni.isVirtual()) continue;
+                java.util.Enumeration<InetAddress> addrs = ni.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress a = addrs.nextElement();
+                    if (a.isLoopbackAddress()) continue;
+                    if (!(a instanceof java.net.Inet4Address)) continue;
+                    if (a.isSiteLocalAddress()) return a.getHostAddress();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** A decoded mesh invite: join the mesh it names. The listen
+     *  screen the user armed IS the consent — no second dialog —
+     *  but the join always names the mesh first, in the toast
+     *  and the status line, and a channel this phone does not
+     *  have is refused plainly instead of joined. The keyed
+     *  mismatch case is refused at the mesh door by the existing
+     *  hello keycheck, with its honest message. */
+    private void handleMeshJoin(JSONObject obj) {
+        String road = obj.optString("road", "");
+        String host = obj.optString("host", "");
+        String address = obj.optString("address", "");
+        String channelId = obj.optString("channelId", "");
+        String channelName = obj.optString("channelName", "");
+        if (channelName.isEmpty()) channelName = channelId;
+        int number = findSlotForIdentity(channelId);
+        if (number < 1) {
+            Toast.makeText(act, "That mesh is on " + channelName
+                    + ", a channel you don't have — ask for the channel "
+                    + "invite first, then join by sound again.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (address.isEmpty()) {
+            Toast.makeText(act, "That mesh sound didn't carry an address "
+                    + "to join — ask them to play it again.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        String who = host.isEmpty() ? "The mesh" : host + "'s mesh";
+        retune(number);
+        if ("lan".equals(road)) {
+            InetAddress addr;
+            try {
+                addr = InetAddress.getByName(address);
+            } catch (Exception e) {
+                Toast.makeText(act, "That mesh sound carried an address "
+                        + "this phone can't reach — ask them to play it again.",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(act, "Joining " + who + " on " + channelName
+                    + " (same Wi-Fi)…", Toast.LENGTH_LONG).show();
+            mesh = newMeshSession("LAN");
+            meshHost = false;
+            mesh.connectToHost(addr);
+            statusText.setText("Joining " + who + " on " + channelName
+                    + " via LAN…");
+        } else if ("p2p".equals(road)) {
+            if (!ensureP2p() || !ensureNearbyPermissions()) return;
+            Toast.makeText(act, "Joining " + who + " on " + channelName
+                    + " (Wi-Fi Direct)… Accept the connection on the "
+                    + "other phone if it asks.", Toast.LENGTH_LONG).show();
+            WifiP2pDevice stub = new WifiP2pDevice();
+            stub.deviceAddress = address;
+            stub.deviceName = host.isEmpty() ? "Mesh host" : host;
+            connectToPeer(stub);
+        } else {
+            Toast.makeText(act, "That mesh sound named a road this "
+                    + "version doesn't know — it was ignored.",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** The local slot whose identity matches the invite's channel
+     *  id (wireId respected, so a moved slot still matches), or
+     *  -1 when no slot speaks as that channel. */
+    private int findSlotForIdentity(String channelId) {
+        if (channelId == null || channelId.isEmpty()) return -1;
+        for (int n = 1; n <= Profile.BANK_SIZE; n++) {
+            if (channelId.equals(Profile.slotIdentity(Profile.slot(act, n)))) {
+                return n;
+            }
+        }
+        return -1;
     }
 
     private void step(int delta) {
@@ -1176,6 +2076,7 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         if (historyAdapter != null) historyAdapter.notifyDataSetChanged();
         refreshHistoryButton();
         refreshThreadHint();
+        refreshFaceIndicators();
     }
 
     private void refreshHistoryButton() {
@@ -1236,6 +2137,39 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         }
     }
 
+    /** Stamps the word-dictionary note (v1.28) onto an entry
+     *  whose text arrived coded with a dictionary this build
+     *  cannot decode. A null note stamps nothing. */
+    private static void markWordNote(JSONObject entry, String wordNote) {
+        if (wordNote == null) return;
+        try {
+            entry.put("wdNote", wordNote);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Stamps a received text's wire form (v1.32) onto its
+     *  entry: the payload exactly as received, whether it
+     *  arrived coded, and the original text's byte count —
+     *  -1 when the payload did not decode, since its
+     *  original size is then unknown. */
+    private static void stampReceivedWire(JSONObject entry, String wire,
+                                          boolean coded, String wordNote,
+                                          String text) {
+        if (wire == null) return;
+        int plainBytes = wordNote != null ? -1
+                : text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        WalkieStore.stampWire(entry, wire, plainBytes, coded);
+    }
+
+    /** True when an entry carries an undecodable word-coded
+     *  text: it is never spoken aloud and never bridged —
+     *  the gateway cannot vouch for content it cannot
+     *  read, and coded text read aloud is gibberish. */
+    static boolean hasWordNote(JSONObject entry) {
+        return entry != null && !entry.optString("wdNote", "").isEmpty();
+    }
+
     /** Reads a received walkie message aloud in the sender's
      *  voice profile when the gate allows (read-aloud on, not
      *  QUIET). Since v1.17 this runs for EVERY received text on
@@ -1251,6 +2185,10 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
      *  error, or an interruption. */
     private void maybeSpeak(String fromName, String senderPub, String text,
                             JSONObject entry) {
+        // v1.28: an undecodable word-coded text is never
+        // spoken — coded text read aloud is gibberish, and
+        // the thread row already carries the honest note.
+        if (hasWordNote(entry)) return;
         VoiceProfile profile = senderPub != null && !senderPub.isEmpty()
                 ? Profile.voiceForSenderKey(act, senderPub)
                 : Profile.voiceForSenderName(act, fromName);
@@ -1265,6 +2203,13 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
      *  heard (v1.18): a thread entry moves to History; a History
      *  entry stays put (markEntryPlayed is a no-op on it). */
     private void replayEntry(JSONObject entry) {
+        // v1.28: tapping an undecodable word-coded entry
+        // restates the note instead of reading codes aloud.
+        if (hasWordNote(entry)) {
+            Toast.makeText(act, entry.optString("wdNote", ""),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
         String senderPub = entry.optString("sender", "");
         VoiceProfile profile = !senderPub.isEmpty()
                 ? Profile.voiceForSenderKey(act, senderPub)
@@ -1323,6 +2268,12 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 .format(new Date(e.optLong("ts")));
         if ("queued".equals(e.optString("state"))) head += "  ·  queued";
         if (e.optBoolean("lowData", false)) head += "  ·  low-data";
+        // v1.24: a relayed message names the phone that
+        // relayed it — the gateway vouches for delivery,
+        // never for authorship.
+        if (e.optBoolean("relayed", false) && !e.optString("via", "").isEmpty()) {
+            head += "  ·  relayed by " + e.optString("via");
+        }
         rowLayout.addView(Ui.text(act, head, 11, Ui.DIM));
         if ("voice".equals(e.optString("kind"))) {
             int secs = Math.max(1, e.optInt("samples") / SAMPLE_RATE);
@@ -1331,7 +2282,15 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                             + (inHistory ? " again" : "") + ")", 15, Ui.TEXT));
         } else {
             rowLayout.addView(Ui.text(act, e.optString("text"), 15, Ui.TEXT));
-            if (!mine) {
+            // v1.28: an undecodable word-coded text names
+            // why it shows as sent, under the text itself —
+            // and carries no read-aloud hint, since tapping
+            // it restates the note instead of speaking.
+            if (hasWordNote(e)) {
+                rowLayout.addView(Ui.text(act,
+                        e.optString("wdNote", ""), 11, Ui.SIGNAL));
+            }
+            if (!mine && !hasWordNote(e)) {
                 rowLayout.addView(Ui.text(act,
                         inHistory
                                 ? "Tap to hear it again in the sender's voice profile."
@@ -1372,7 +2331,7 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 }
             });
             list.setOnItemLongClickListener((p, v, pos, id) -> {
-                showEntryInfo(historyEntries.get(pos));
+                showEntryMenu(v, historyEntries.get(pos));
                 return true;
             });
             box.addView(list, new LinearLayout.LayoutParams(
@@ -1385,15 +2344,55 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 .show();
     }
 
+    /** The long-press menu, shared by the thread and
+     *  History (v1.32): a text entry offers "View encoded
+     *  message" plus the detail line; a voice entry has no
+     *  coded form, so it shows the detail line directly. */
+    private void showEntryMenu(View anchor, JSONObject entry) {
+        if (!"text".equals(entry.optString("kind"))) {
+            showEntryInfo(entry);
+            return;
+        }
+        PopupMenu menu = new PopupMenu(act, anchor);
+        menu.getMenu().add("View encoded message");
+        menu.getMenu().add("Details");
+        menu.setOnMenuItemClickListener(item -> {
+            if ("View encoded message".equals(item.getTitle().toString())) {
+                showEncodedForEntry(entry);
+            } else {
+                showEntryInfo(entry);
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    /** The long-press encoded view for one thread entry:
+     *  the recorded wire form, never a re-encode. */
+    private void showEncodedForEntry(JSONObject entry) {
+        EncodedMessageDialog.show(act,
+                entry.has("wire") ? entry.optString("wire") : null,
+                entry.optInt("plainBytes", -1),
+                entry.optBoolean("coded", false),
+                entry.has("wdNote") ? entry.optString("wdNote") : null,
+                entry.optString("text", ""),
+                entry.optBoolean("relayed", false)
+                        ? entry.optString("via", "") : null);
+    }
+
     /** The long-press detail toast, shared by the thread and
      *  History (sender, time, road, state). */
     private void showEntryInfo(JSONObject entry) {
         String road = entry.optString("road", "");
         String when = DateFormat.getTimeInstance(DateFormat.SHORT)
                 .format(new Date(entry.optLong("ts")));
+        String relayed = entry.optBoolean("relayed", false)
+                && !entry.optString("via", "").isEmpty()
+                ? " · relayed by " + entry.optString("via") : "";
         Toast.makeText(act,
                 entry.optString("from") + " · " + when
                         + (road.isEmpty() ? "" : " · via " + road)
+                        + relayed
                         + " · " + entry.optString("state", ""),
                 Toast.LENGTH_LONG).show();
     }
@@ -1435,14 +2434,35 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             saveWalkieState("live via " + sessionRoad + " with " + names.size()
                     + " nearby member(s)");
             ui.post(() -> {
+                lastMemberCount = names.size();
                 membersText.setText(names.isEmpty()
                         ? "Session open — nobody else here yet."
                         : "On this channel nearby: " + String.join(", ", names));
+                // Road change (v1.23): a live local session
+                // decides the mode by itself under Auto.
+                applyModeDecision();
                 tryFlushOutbox();
             });
         }
 
-        @Override public void onTalker(String name) {
+        @Override public void onTalker(String name, BridgeRule.Relayed meta,
+                                     String mid) {
+            // An inbound spurt opens a fresh capture for
+            // bridging (v1.24): the talker, the provenance
+            // the spurt-start packet carried, the spurt's
+            // message id, and an empty audio buffer. Own
+            // spurts (name is this phone, while
+            // transmitting) never open a capture — own
+            // traffic is never bridged.
+            if (name != null && !recording && !name.equals(myName())) {
+                synchronized (meshSpurtLock) {
+                    meshSpurtPcm.reset();
+                    meshSpurtTalker = name;
+                    meshSpurtMeta = meta;
+                    meshSpurtMid = mid == null ? "" : mid;
+                    meshSpurtOverflow = false;
+                }
+            }
             ui.post(() -> {
                 if (name != null) {
                     talkerText.setText(name + " is talking…");
@@ -1454,25 +2474,85 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             });
         }
 
-        @Override public void onText(String from, String text, boolean lowData) {
+        @Override public void onText(String from, String text, boolean lowData,
+                                     BridgeRule.Relayed meta, String mid,
+                                     String wordNote, String wire, boolean coded) {
             ui.post(() -> {
+                // Every received text gets the bridge id
+                // derived from its origin identity (v1.24): a
+                // text whose id is already in the thread is
+                // the same message arriving on a second road
+                // — it lands once, and is neither spoken nor
+                // bridged again.
+                String bid = BridgeRule.localArrivalBid(mid, meta);
+                if (BridgeRule.entryWithBid(
+                        WalkieStore.thread(act, identity), bid)) {
+                    return;
+                }
                 JSONObject entry = WalkieStore.entry(
                         "text", from, text, "", 0, sessionRoad, false, "sent");
                 if (lowData) markLowData(entry);
+                markWordNote(entry, wordNote);
+                // v1.32: the wire form as received, so the
+                // long-press view shows the real coded form.
+                // An undecoded payload's original size is
+                // unknown — the wire IS the text shown.
+                stampReceivedWire(entry, wire, coded, wordNote, text);
+                if (meta != null) {
+                    BridgeRule.stampRelayedEntry(entry, meta);
+                } else {
+                    BridgeRule.stampBid(entry, bid);
+                }
+                BridgeRule.markBridgeSeen(entry);
                 appendEntry(entry);
-                maybeSpeak(from, null, text, entry);
+                maybeSpeak(entry.optString("from"), entry.optString("sender"),
+                        text, entry);
+                bridgeLocalText(BridgeRule.Transport.MESH, entry, text,
+                        lowData, meta);
             });
         }
 
         @Override public void onVoice(byte[] pcm) {
             if (playTrack != null) playTrack.write(pcm, 0, pcm.length);
+            synchronized (meshSpurtLock) {
+                if (meshSpurtOverflow) return;
+                if (meshSpurtPcm.size() + pcm.length > MAX_BRIDGE_SPURT_PCM) {
+                    meshSpurtOverflow = true;
+                    return;
+                }
+                meshSpurtPcm.write(pcm, 0, pcm.length);
+            }
         }
 
         @Override public void onSpurtEnd() {
+            // Snapshot the capture under the lock, on this
+            // reader thread, before any later spurt can reset
+            // it; the bridge decision runs on the UI thread.
+            final byte[] pcm;
+            final String talker;
+            final BridgeRule.Relayed meta;
+            final String mid;
+            final boolean overflow;
+            synchronized (meshSpurtLock) {
+                pcm = meshSpurtPcm.toByteArray();
+                talker = meshSpurtTalker;
+                meta = meshSpurtMeta;
+                mid = meshSpurtMid;
+                overflow = meshSpurtOverflow;
+                meshSpurtPcm.reset();
+                meshSpurtTalker = "";
+                meshSpurtMeta = null;
+                meshSpurtMid = "";
+                meshSpurtOverflow = false;
+            }
             ui.post(() -> {
                 beep();
                 talkerText.setText("");
                 stopPlayTrack();
+                if (!overflow && pcm.length > 0 && !talker.isEmpty()) {
+                    bridgeLocalVoice(BridgeRule.Transport.MESH, pcm, talker,
+                            meta, mid);
+                }
             });
         }
 
@@ -1611,8 +2691,29 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         }
         btLive = false;
         if (lan != null) lan.stop();
+        // A stopped session ends any in-flight spurt: drop
+        // the bridge captures so a partial burst can never
+        // forward later (v1.24).
+        synchronized (meshSpurtLock) {
+            meshSpurtPcm.reset();
+            meshSpurtTalker = "";
+            meshSpurtMeta = null;
+            meshSpurtOverflow = false;
+        }
+        synchronized (btSpurtLock) {
+            btSpurtAdpcm.reset();
+            btSpurtTalker = "";
+            btSpurtMeta = null;
+            btSpurtOverflow = false;
+        }
         saveWalkieState("no live local session reported");
         stopPlayTrack();
+        // Road change (v1.23): the local session is gone, so
+        // under Auto the connection is tested again.
+        lastMemberCount = 0;
+        lastBtPeer = "";
+        refreshFaceIndicators();
+        maybeProbe();
     }
 
     // ---- Wi-Fi Direct plumbing ----
@@ -1702,13 +2803,29 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             btLive = true;
             saveWalkieState("live via Bluetooth with " + name);
             ui.post(() -> {
+                lastBtPeer = name != null ? name : "";
                 membersText.setText("Bluetooth: paired with " + name + ".");
+                // Road change (v1.23): a live local session
+                // decides the mode by itself under Auto.
+                applyModeDecision();
                 tryFlushOutbox();
             });
         }
 
-        @Override public void onSpurtStart(String name) {
+        @Override public void onSpurtStart(String name, BridgeRule.Relayed meta,
+                                         String mid) {
             btDecoder = new Adpcm();
+            // An inbound spurt opens a fresh capture for
+            // bridging (v1.24), as on the mesh: the talker,
+            // the provenance, the spurt's message id, and an
+            // empty frame buffer.
+            synchronized (btSpurtLock) {
+                btSpurtAdpcm.reset();
+                btSpurtTalker = name;
+                btSpurtMeta = meta;
+                btSpurtMid = mid == null ? "" : mid;
+                btSpurtOverflow = false;
+            }
             ui.post(() -> {
                 talkerText.setText(name + " is talking (Bluetooth burst)…");
                 startPlayTrack();
@@ -1724,23 +2841,74 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                 bytes[2 * i + 1] = (byte) ((pcm[i] >> 8) & 0xFF);
             }
             playTrack.write(bytes, 0, bytes.length);
+            synchronized (btSpurtLock) {
+                if (btSpurtOverflow) return;
+                if (btSpurtAdpcm.size() + adpcmFrame.length > MAX_BRIDGE_SPURT_ADPCM) {
+                    btSpurtOverflow = true;
+                    return;
+                }
+                btSpurtAdpcm.write(adpcmFrame, 0, adpcmFrame.length);
+            }
         }
 
         @Override public void onSpurtEnd() {
+            final byte[] adpcm;
+            final String talker;
+            final BridgeRule.Relayed meta;
+            final String mid;
+            final boolean overflow;
+            synchronized (btSpurtLock) {
+                adpcm = btSpurtAdpcm.toByteArray();
+                talker = btSpurtTalker;
+                meta = btSpurtMeta;
+                mid = btSpurtMid;
+                overflow = btSpurtOverflow;
+                btSpurtAdpcm.reset();
+                btSpurtTalker = "";
+                btSpurtMeta = null;
+                btSpurtMid = "";
+                btSpurtOverflow = false;
+            }
             ui.post(() -> {
                 beep();
                 talkerText.setText("");
                 stopPlayTrack();
+                if (!overflow && adpcm.length > 0 && !talker.isEmpty()) {
+                    bridgeBtVoice(adpcm, talker, meta, mid);
+                }
             });
         }
 
-        @Override public void onText(String from, String text, boolean lowData) {
+        @Override public void onText(String from, String text, boolean lowData,
+                                     BridgeRule.Relayed meta, String mid,
+                                     String wordNote, String wire, boolean coded) {
             ui.post(() -> {
+                // Same cross-road duplicate rule as the mesh:
+                // every received text gets the bridge id
+                // derived from its origin identity, and one
+                // already in the thread lands once — neither
+                // spoken nor bridged again.
+                String bid = BridgeRule.localArrivalBid(mid, meta);
+                if (BridgeRule.entryWithBid(
+                        WalkieStore.thread(act, identity), bid)) {
+                    return;
+                }
                 JSONObject entry = WalkieStore.entry(
                         "text", from, text, "", 0, "Bluetooth", false, "sent");
                 if (lowData) markLowData(entry);
+                markWordNote(entry, wordNote);
+                stampReceivedWire(entry, wire, coded, wordNote, text);
+                if (meta != null) {
+                    BridgeRule.stampRelayedEntry(entry, meta);
+                } else {
+                    BridgeRule.stampBid(entry, bid);
+                }
+                BridgeRule.markBridgeSeen(entry);
                 appendEntry(entry);
-                maybeSpeak(from, null, text, entry);
+                maybeSpeak(entry.optString("from"), entry.optString("sender"),
+                        text, entry);
+                bridgeLocalText(BridgeRule.Transport.BLUETOOTH, entry, text,
+                        lowData, meta);
             });
         }
     };
@@ -1882,8 +3050,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         }
         if (!SpeechTranscriber.isModelReady(act)) {
             Toast.makeText(act, "Download the speech model first — it's "
-                    + "in Low-data mode below.", Toast.LENGTH_LONG).show();
-            refreshLowDataBlock();
+                    + "in the radio menu.", Toast.LENGTH_LONG).show();
+            refreshModeSection();
             return;
         }
         startSpurtInternal(true);
@@ -1902,12 +3070,16 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         recording = true;
         lowDataRecording = lowData;
         spurtPcm.reset();
+        // One message id for this spurt, shared by every road
+        // it rides (v1.24): the local roads carry it in the
+        // spurt-start packet, and the relay post reuses it.
+        spurtMid = java.util.UUID.randomUUID().toString();
         pttButton.setText(lowData ? "LISTENING" : "TALKING");
         pttButton.setTextColor(Ui.ACCENT_INK);
         pttButton.setBackground(pttDrawable(true));
         if (!lowData) {
-            if (meshLive && mesh != null) mesh.beginSpurt();
-            if (btLive && bt != null) bt.sendSpurtStart();
+            if (meshLive && mesh != null) mesh.beginSpurt(spurtMid);
+            if (btLive && bt != null) bt.sendSpurtStart(spurtMid);
         } else {
             statusText.setText("Listening — release to transcribe on this phone.");
         }
@@ -2012,7 +3184,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         voiceCache.put(entryTs, adpcm);
         appendEntry(entry);
         beep();
-        if (relayOnline()) postBurstToRelay(entry, adpcm, roads.size() > 1);
+        if (relayOnline()) postBurstToRelay(entry, adpcm, roads.size() > 1, spurtMid);
+        spurtMid = "";
     }
 
     /** Low-data release path: transcribe on-device, then show the
@@ -2082,9 +3255,17 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
      *  (PROTOCOL §6) — sealed with the channel key on private
      *  channels, plain base64 on open ones (public by design). */
     private void postBurstToRelay(final JSONObject entry, byte[] adpcm,
-                                  final boolean otherRoadsCarried) {
+                                  final boolean otherRoadsCarried,
+                                  final String mid) {
         final String channel = relayChannelId;
-        final String cmid = java.util.UUID.randomUUID().toString();
+        // v1.24: when the spurt also rode a local road, the
+        // relay post's client message id IS the spurt's
+        // message id ("m:"+mid) — the same identity gateways
+        // derive the bridge id from, so a gatewayed copy
+        // dedups against this post instead of doubling it.
+        // A relay-only burst keeps a random UUID.
+        final String cmid = mid != null && !mid.isEmpty()
+                ? "m:" + mid : java.util.UUID.randomUUID().toString();
         final String blob;
         try {
             blob = relayKeyBytes != null
@@ -2097,6 +3278,11 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             @Override public void ok(RelayCore.PostResult r) {
                 try {
                     entry.put("cmid", cmid);
+                    // The own entry carries the same bridge
+                    // id a gatewayed copy would, so the copy
+                    // coming back dedups instead of landing
+                    // as a second entry (v1.24).
+                    entry.put("bid", BridgeRule.relayArrivalBid(cmid, null));
                 } catch (Exception ignored) {
                 }
                 seenCmids.add(cmid);
@@ -2195,18 +3381,25 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
      *  thread entry keeps it so the marker survives reloads. */
     private void sendChannelText(String text, boolean lowData) {
         if (meshLive && mesh != null) {
-            mesh.sendText(text, lowData);
+            SentText sent = mesh.sendText(text, lowData);
             JSONObject entry = WalkieStore.entry("text", myName(), text, "", 0,
                     sessionRoad, true, "sent");
             if (lowData) markLowData(entry);
+            WalkieStore.stampWire(entry, sent.wire, sent.plainBytes, true);
+            // v1.24: the own entry carries the same bridge id
+            // a gatewayed copy would, so the copy coming back
+            // dedups instead of landing as a second entry.
+            BridgeRule.stampBid(entry, BridgeRule.localArrivalBid(sent.mid, null));
             appendEntry(entry);
             return;
         }
         if (btLive && bt != null) {
-            bt.sendText(text, lowData);
+            SentText sent = bt.sendText(text, lowData);
             JSONObject entry = WalkieStore.entry("text", myName(), text, "", 0,
                     "Bluetooth", true, "sent");
             if (lowData) markLowData(entry);
+            WalkieStore.stampWire(entry, sent.wire, sent.plainBytes, true);
+            BridgeRule.stampBid(entry, BridgeRule.localArrivalBid(sent.mid, null));
             appendEntry(entry);
             return;
         }
@@ -2228,8 +3421,16 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         final String cmid = java.util.UUID.randomUUID().toString();
         final String blob;
         try {
-            byte[] plain = LowDataEnvelope.build(text, lowData)
+            LowDataEnvelope.Built built =
+                    LowDataEnvelope.buildDetailed(text, lowData, channel);
+            byte[] plain = built.envelope
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            // v1.32: the entry records the exact wire form
+            // being sent, so the long-press view shows the
+            // real coded form, never a re-encode.
+            WalkieStore.stampWire(entry, built.wire,
+                    text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
+                    true);
             blob = relayKeyBytes != null
                     ? RelayCrypto.seal(relayKeyBytes, plain)
                     : RelayKeys.b64Std(plain);
@@ -2242,6 +3443,8 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
                     entry.put("state", "sent");
                     entry.put("road", "Internet");
                     entry.put("cmid", cmid);
+                    BridgeRule.stampBid(entry,
+                            BridgeRule.relayArrivalBid(cmid, null));
                 } catch (Exception ignored) {
                 }
                 seenCmids.add(cmid);
@@ -2264,12 +3467,14 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             long ts = q.optLong("ts");
             boolean lowData = q.optBoolean("ld", false);
             if (meshLive && mesh != null) {
-                mesh.sendText(text, lowData);
-                markQueuedSent(ts, sessionRoad);
+                SentText sent = mesh.sendText(text, lowData);
+                markQueuedSent(ts, sessionRoad,
+                        BridgeRule.localArrivalBid(sent.mid, null), sent);
                 WalkieStore.removeQueued(act, identity, ts);
             } else if (btLive && bt != null) {
-                bt.sendText(text, lowData);
-                markQueuedSent(ts, "Bluetooth");
+                SentText sent = bt.sendText(text, lowData);
+                markQueuedSent(ts, "Bluetooth",
+                        BridgeRule.localArrivalBid(sent.mid, null), sent);
                 WalkieStore.removeQueued(act, identity, ts);
             } else if (relayOnline()) {
                 // find the matching thread entry and send via the relay
@@ -2283,18 +3488,415 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
         }
     }
 
-    private void markQueuedSent(long ts, String road) {
+    private void markQueuedSent(long ts, String road, String bid, SentText sent) {
         for (JSONObject e : threadEntries) {
             if (e.optLong("ts") == ts && "queued".equals(e.optString("state"))) {
                 try {
                     e.put("state", "sent");
                     e.put("road", road);
+                    if (sent != null) {
+                        WalkieStore.stampWire(e, sent.wire, sent.plainBytes, true);
+                    }
+                    if (bid != null && !bid.isEmpty()) {
+                        BridgeRule.stampBid(e, bid);
+                    }
                 } catch (Exception ignored) {
                 }
             }
         }
         WalkieStore.saveNow(act);
         threadAdapter.notifyDataSetChanged();
+    }
+
+    // ------------------------------------------------------------ bridging (v1.24)
+
+    /** True when this phone may carry a private-channel
+     *  message: open channels need no key, and a private
+     *  channel needs the valid 32-byte channel key. */
+    private boolean holdsChannelKey() {
+        return !Profile.isPrivate(slot) || relayKeyBytes != null;
+    }
+
+    /** The roads live right now, for the fan-out decision. */
+    private EnumSet<BridgeRule.Transport> connectedRoads() {
+        EnumSet<BridgeRule.Transport> out =
+                EnumSet.noneOf(BridgeRule.Transport.class);
+        if (meshLive && mesh != null) out.add(BridgeRule.Transport.MESH);
+        if (btLive && bt != null) out.add(BridgeRule.Transport.BLUETOOTH);
+        if (relayOnline()) out.add(BridgeRule.Transport.RELAY);
+        return out;
+    }
+
+    /** The fan-out decision for one received message, with
+     *  the live state filled in: the switch, the channel
+     *  key, the persisted forwarded set, and whether this
+     *  phone is transmitting (bridging never triggers
+     *  during an active transmission). */
+    private EnumSet<BridgeRule.Transport> bridgeTargets(
+            BridgeRule.Transport arrivedOn, BridgeRule.Relayed meta, String bid) {
+        boolean already = bid != null && !bid.isEmpty()
+                && WalkieStore.hasForwardedBid(act, bid);
+        Set<BridgeRule.Transport> trav = meta != null ? meta.traversed
+                : EnumSet.noneOf(BridgeRule.Transport.class);
+        return BridgeRule.targets(arrivedOn, connectedRoads(), bridgingOn(),
+                Profile.isPrivate(slot), holdsChannelKey(), already,
+                recording || transcribing, trav);
+    }
+
+    /** The provenance stamp for the forwarded copies: the
+     *  same bid and origin, this phone named as the gateway,
+     *  the arrival road added to traversed. The bid is the
+     *  one derived at receipt — a direct message's bid comes
+     *  from its origin identity, never minted here, so two
+     *  gateways forward under the same bid. */
+    private BridgeRule.Relayed forwardStamp(BridgeRule.Relayed meta, String bid,
+                                            String origName, String origPub, long origTs,
+                                            BridgeRule.Transport arrivedOn) {
+        BridgeRule.Relayed base = meta != null ? meta
+                : BridgeRule.Relayed.of(bid, origName, origPub, origTs, "",
+                        EnumSet.noneOf(BridgeRule.Transport.class));
+        return base.forwarded(myName(), arrivedOn);
+    }
+
+    /** Bridges a text received on a local road (mesh or
+     *  Bluetooth). The entry already exists in the thread
+     *  and already carries the bid derived at receipt; the
+     *  forward records the traversed set onto it. */
+    private void bridgeLocalText(BridgeRule.Transport arrivedOn,
+                                 JSONObject entry, String text, boolean lowData,
+                                 BridgeRule.Relayed meta) {
+        // v1.28: an undecodable word-coded text is never
+        // bridged — the gateway cannot vouch for content
+        // it cannot read, and re-coding coded text would
+        // hand the far side a doubly-wrapped payload.
+        if (hasWordNote(entry)) return;
+        String bid = entry.optString("bid", "");
+        EnumSet<BridgeRule.Transport> to = bridgeTargets(arrivedOn, meta, bid);
+        if (to.isEmpty()) return;
+        BridgeRule.Relayed stamp = forwardStamp(meta, bid,
+                entry.optString("from"), entry.optString("sender"),
+                entry.optLong("ts"), arrivedOn);
+        try {
+            entry.put("trav", BridgeRule.travString(stamp.traversed));
+        } catch (Exception ignored) {
+        }
+        WalkieStore.noteForwardedBid(act, stamp.bid);
+        WalkieStore.saveNow(act);
+        String origName = entry.optString("from");
+        if (to.contains(BridgeRule.Transport.RELAY)) {
+            postBridgeToRelay(true, text, lowData, null, stamp);
+        }
+        if (to.contains(BridgeRule.Transport.MESH)) {
+            forwardTextToMesh(text, lowData, stamp, origName);
+        }
+        if (to.contains(BridgeRule.Transport.BLUETOOTH)) {
+            forwardTextToBt(text, lowData, stamp, origName);
+        }
+    }
+
+    /** Bridges a voice burst received on the mesh: the
+     *  captured PCM is encoded to ADPCM, the shared voice
+     *  path decides and forwards. */
+    private void bridgeLocalVoice(BridgeRule.Transport arrivedOn,
+                                  byte[] pcmBytes, String talker,
+                                  BridgeRule.Relayed meta, String mid) {
+        int samples = pcmBytes.length / 2;
+        if (samples <= 0) return;
+        short[] pcm = new short[samples];
+        for (int i = 0; i < samples; i++) {
+            pcm[i] = (short) ((pcmBytes[2 * i] & 0xFF) | (pcmBytes[2 * i + 1] << 8));
+        }
+        bridgeVoiceCommon(arrivedOn, Adpcm.encodeBurst(pcm), samples,
+                talker, meta, mid);
+    }
+
+    /** Bridges a voice burst received on Bluetooth: the
+     *  captured ADPCM frames forward as-is. */
+    private void bridgeBtVoice(byte[] adpcm, String talker,
+                               BridgeRule.Relayed meta, String mid) {
+        bridgeVoiceCommon(BridgeRule.Transport.BLUETOOTH, adpcm,
+                adpcm.length * 2, talker, meta, mid);
+    }
+
+    /** The shared bridged-voice path. Live bursts normally
+     *  leave no thread record — but a bridged burst gets one:
+     *  the entry is what tap-to-play replays, and its bid is
+     *  what stops the same burst landing twice when its relay
+     *  copy arrives. When nothing forwards, no entry is
+     *  created at all: exactly the pre-v1.24 behavior. The
+     *  entry is unplayed until played, like every received
+     *  burst, and is never auto-played. */
+    private void bridgeVoiceCommon(BridgeRule.Transport arrivedOn,
+                                   byte[] adpcm, int samples, String talker,
+                                   BridgeRule.Relayed meta, String mid) {
+        String bid = BridgeRule.localArrivalBid(mid, meta);
+        EnumSet<BridgeRule.Transport> to = bridgeTargets(arrivedOn, meta, bid);
+        if (to.isEmpty()) return;
+        String origName = meta != null ? meta.origName : talker;
+        String origPub = meta != null ? meta.origPub : "";
+        long origTs = meta != null && meta.origTs > 0
+                ? meta.origTs : System.currentTimeMillis();
+        BridgeRule.Relayed stamp = forwardStamp(meta, bid, origName, origPub,
+                origTs, arrivedOn);
+        String road = arrivedOn == BridgeRule.Transport.MESH
+                ? sessionRoad : "Bluetooth";
+        JSONObject entry = WalkieStore.entry("voice", origName, "", "",
+                samples, road, false, "sent");
+        if (meta != null) BridgeRule.stampRelayedEntry(entry, meta);
+        try {
+            entry.put("bid", stamp.bid);
+            entry.put("trav", BridgeRule.travString(stamp.traversed));
+            entry.put("blob", RelayKeys.b64Std(adpcm));
+        } catch (Exception ignored) {
+        }
+        BridgeRule.markBridgeSeen(entry);
+        voiceCache.put(entry.optLong("ts"), adpcm);
+        appendEntry(entry);
+        WalkieStore.noteForwardedBid(act, stamp.bid);
+        WalkieStore.saveNow(act);
+        if (to.contains(BridgeRule.Transport.RELAY)) {
+            postBridgeToRelay(false, "", false, adpcm, stamp);
+        }
+        if (to.contains(BridgeRule.Transport.MESH)) {
+            forwardVoiceToMesh(adpcm, stamp, origName);
+        }
+        if (to.contains(BridgeRule.Transport.BLUETOOTH)) {
+            forwardVoiceToBt(adpcm, stamp, origName);
+        }
+    }
+
+    /** Bridges a message received on the relay — from the
+     *  page's own poll loop, or from the subscription
+     *  service's store via the pending scan. The entry
+     *  already exists; the decision is made exactly once
+     *  (bridgeSeen), forwarded or not, so a later scan never
+     *  republishes an old message. Own messages never reach
+     *  here. */
+    private void bridgeRelayEntry(JSONObject entry, boolean isText,
+                                  String text, boolean lowData, byte[] adpcm,
+                                  BridgeRule.Relayed meta) {
+        if (HistoryRule.isMine(entry)) return;
+        BridgeRule.markBridgeSeen(entry);
+        // v1.28: an undecodable word-coded text is never
+        // bridged (see bridgeLocalText). Bursts are
+        // unaffected — they carry no word coding.
+        if (isText && hasWordNote(entry)) {
+            WalkieStore.saveNow(act);
+            return;
+        }
+        // The bid was derived at ingest and stamped on the
+        // entry; an entry without one predates bridging and
+        // is never forwarded (see the pending scan).
+        String bid = entry.optString("bid", "");
+        if (bid.isEmpty()) {
+            WalkieStore.saveNow(act);
+            return;
+        }
+        EnumSet<BridgeRule.Transport> to = bridgeTargets(
+                BridgeRule.Transport.RELAY, meta, bid);
+        if (to.isEmpty()) {
+            WalkieStore.saveNow(act);
+            return;
+        }
+        BridgeRule.Relayed stamp = forwardStamp(meta, bid,
+                entry.optString("from"), entry.optString("sender"),
+                entry.optLong("ts"), BridgeRule.Transport.RELAY);
+        try {
+            entry.put("trav", BridgeRule.travString(stamp.traversed));
+        } catch (Exception ignored) {
+        }
+        WalkieStore.noteForwardedBid(act, stamp.bid);
+        WalkieStore.saveNow(act);
+        String origName = entry.optString("from");
+        if (to.contains(BridgeRule.Transport.MESH)) {
+            if (isText) forwardTextToMesh(text, lowData, stamp, origName);
+            else if (adpcm != null) forwardVoiceToMesh(adpcm, stamp, origName);
+        }
+        if (to.contains(BridgeRule.Transport.BLUETOOTH)) {
+            if (isText) forwardTextToBt(text, lowData, stamp, origName);
+            else if (adpcm != null) forwardVoiceToBt(adpcm, stamp, origName);
+        }
+    }
+
+    /** The pending scan: relay arrivals the subscription
+     *  service stored (it cannot forward — the local
+     *  sessions live on this page) get their one bridge
+     *  decision here, from the stored entry alone. Runs on
+     *  the subscription broadcast and when the page comes
+     *  forward. Only tuned-channel relay arrivals with a
+     *  client message id qualify; everything else is left
+     *  exactly as it was. */
+    private void bridgePendingRelayEntries() {
+        if (pageDead) return;
+        for (JSONObject e : WalkieStore.thread(act, identity)) {
+            if (HistoryRule.isMine(e)) continue;
+            if (BridgeRule.isBridgeSeen(e)) continue;
+            if (!"Internet".equals(e.optString("road", ""))) continue;
+            if (e.optString("cmid", "").isEmpty()) continue;
+            // No bid means the entry predates bridging (a
+            // pre-v1.24 store): mark it seen and leave it —
+            // upgrading must never republish old messages.
+            if (e.optString("bid", "").isEmpty()) {
+                BridgeRule.markBridgeSeen(e);
+                WalkieStore.saveNow(act);
+                continue;
+            }
+            boolean isText = "text".equals(e.optString("kind"));
+            byte[] adpcm = null;
+            if (!isText) {
+                String blob = e.optString("blob", "");
+                if (!blob.isEmpty()) {
+                    try {
+                        adpcm = RelayKeys.b64StdDecode(blob);
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (adpcm == null) {
+                    BridgeRule.markBridgeSeen(e);
+                    WalkieStore.saveNow(act);
+                    continue;
+                }
+            }
+            bridgeRelayEntry(e, isText, e.optString("text", ""),
+                    e.optBoolean("lowData", false), adpcm,
+                    BridgeRule.relayedFromEntry(e));
+        }
+    }
+
+    // ---- bridge sends: one single-flight guard per transport ----
+
+    /** Publishes a bridged message to the relay channel: the
+     *  payload carries the provenance (envelope keys for a
+     *  text, the header line for a burst), sealed with the
+     *  channel key on private channels exactly like a direct
+     *  post. The post is signed by THIS phone — the gateway
+     *  — never as the original sender. A failed post is not
+     *  retried: bridging is live only. */
+    private void postBridgeToRelay(boolean isText, String text,
+                                   boolean lowData, byte[] adpcm,
+                                   BridgeRule.Relayed stamp) {
+        if (!relayBridgeBusy.compareAndSet(false, true)) return;
+        final String channel = relayChannelId;
+        final String cmid = java.util.UUID.randomUUID().toString();
+        final String blob;
+        try {
+            byte[] plain = isText
+                    ? BridgeRule.buildRelayedText(text, lowData, stamp, channel)
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                    : BridgeRule.buildRelayedBurstPayload(stamp, adpcm);
+            blob = relayKeyBytes != null
+                    ? RelayCrypto.seal(relayKeyBytes, plain)
+                    : RelayKeys.b64Std(plain);
+        } catch (Exception e) {
+            relayBridgeBusy.set(false);
+            return;
+        }
+        RelayClient.post(act, channel, cmid, blob,
+                new RelayClient.Cb<RelayCore.PostResult>() {
+                    @Override public void ok(RelayCore.PostResult r) {
+                        // The gateway's own post comes back on
+                        // the next pull: the cmid suppresses
+                        // re-ingest, as for a direct post.
+                        seenCmids.add(cmid);
+                        relayBridgeBusy.set(false);
+                    }
+
+                    @Override public void err(String code, String message) {
+                        relayBridgeBusy.set(false);
+                    }
+                });
+    }
+
+    private void forwardTextToMesh(String text, boolean lowData,
+                                   BridgeRule.Relayed stamp, String origName) {
+        if (!meshBridgeBusy.compareAndSet(false, true)) return;
+        final MeshNet target = mesh;
+        BRIDGE_POOL.execute(() -> {
+            try {
+                if (meshLive && target != null) {
+                    target.sendTextAs(origName, text, lowData, stamp);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                meshBridgeBusy.set(false);
+            }
+        });
+    }
+
+    private void forwardTextToBt(String text, boolean lowData,
+                                 BridgeRule.Relayed stamp, String origName) {
+        if (!btBridgeBusy.compareAndSet(false, true)) return;
+        final BtWalkie target = bt;
+        BRIDGE_POOL.execute(() -> {
+            try {
+                if (btLive && target != null) {
+                    target.sendTextAs(origName, text, lowData, stamp);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                btBridgeBusy.set(false);
+            }
+        });
+    }
+
+    /** Re-streams a burst onto the mesh: the ADPCM is
+     *  decoded to PCM (the mesh carries PCM, encrypted per
+     *  chunk on keyed sessions) and sent in the same 640-
+     *  sample chunks the live path uses. Socket backpressure
+     *  paces the stream — no sleeps, no extra buffering. */
+    private void forwardVoiceToMesh(byte[] adpcm, BridgeRule.Relayed stamp,
+                                    String origName) {
+        if (!meshBridgeBusy.compareAndSet(false, true)) return;
+        final MeshNet target = mesh;
+        BRIDGE_POOL.execute(() -> {
+            try {
+                if (meshLive && target != null) {
+                    short[] pcm = Adpcm.decodeBurst(adpcm, adpcm.length * 2);
+                    byte[] bytes = new byte[pcm.length * 2];
+                    for (int i = 0; i < pcm.length; i++) {
+                        bytes[2 * i] = (byte) (pcm[i] & 0xFF);
+                        bytes[2 * i + 1] = (byte) ((pcm[i] >> 8) & 0xFF);
+                    }
+                    target.beginSpurtAs(origName, stamp);
+                    for (int off = 0; off < bytes.length; off += 1280) {
+                        int n = Math.min(1280, bytes.length - off);
+                        byte[] chunk = new byte[n];
+                        System.arraycopy(bytes, off, chunk, 0, n);
+                        target.sendVoice(chunk);
+                    }
+                    target.endSpurt();
+                }
+            } catch (Exception ignored) {
+            } finally {
+                meshBridgeBusy.set(false);
+            }
+        });
+    }
+
+    /** Re-streams a burst over Bluetooth: the ADPCM frames
+     *  forward as-is, in the same 800-byte frames the live
+     *  path uses. */
+    private void forwardVoiceToBt(byte[] adpcm, BridgeRule.Relayed stamp,
+                                  String origName) {
+        if (!btBridgeBusy.compareAndSet(false, true)) return;
+        final BtWalkie target = bt;
+        BRIDGE_POOL.execute(() -> {
+            try {
+                if (btLive && target != null) {
+                    target.sendSpurtStartAs(origName, stamp);
+                    for (int off = 0; off < adpcm.length; off += 800) {
+                        int n = Math.min(800, adpcm.length - off);
+                        byte[] frame = new byte[n];
+                        System.arraycopy(adpcm, off, frame, 0, n);
+                        target.sendFrame(frame);
+                    }
+                    target.sendSpurtEnd();
+                }
+            } catch (Exception ignored) {
+            } finally {
+                btBridgeBusy.set(false);
+            }
+        });
     }
 
     // ------------------------------------------------------------ relay loop
@@ -2380,22 +3982,66 @@ public class WalkiePage extends LinearLayout implements PagerLayout.PagerPage {
             // open channel) decodes to null: not ours to show.
             RelayIngest.Decoded d = RelayIngest.decode(relayKeyBytes, m.ciphertext);
             if (d == null) continue;
+            // v1.24: every arrival gets the bridge id derived
+            // from its origin identity. One whose id is
+            // already in the thread arrived on another road
+            // first — it lands once, never twice.
+            String bid = BridgeRule.relayArrivalBid(m.clientMsgId, d.relayed);
+            if (BridgeRule.entryWithBid(WalkieStore.thread(act, identity), bid)) {
+                continue;
+            }
             boolean mine = myPub.equals(m.sender);
             String from = mine ? myName() : ContactCard.senderName(act, m.sender);
+            String senderPub = m.sender;
             if (d.isText) {
+                // v1.29: clean decodes teach the table their
+                // new words, and adopted teach-block codes
+                // mark this channel taught.
+                DictStore.noteReceived(relayChannelId,
+                        new WordDict.Result(d.text, d.wordNote, d.adopted));
                 JSONObject entry = WalkieStore.entry("text", from, d.text, "", 0,
                         "Internet", mine, "sent");
                 RelayIngest.stampEntry(entry, m, d);
+                if (d.relayed != null) {
+                    // The entry shows the ORIGINAL sender at
+                    // the ORIGINAL time, marked relayed; the
+                    // gateway's authenticated relay identity
+                    // is kept alongside for honesty.
+                    BridgeRule.stampRelayedEntry(entry, d.relayed);
+                    try {
+                        entry.put("viaPub", m.sender);
+                    } catch (Exception ignored) {
+                    }
+                    from = d.relayed.origName;
+                    senderPub = d.relayed.origPub;
+                } else {
+                    BridgeRule.stampBid(entry, bid);
+                }
                 appendEntry(entry);
                 if (!mine) {
-                    maybeSpeak(from, m.sender, d.text, entry);
+                    maybeSpeak(from, senderPub, d.text, entry);
+                    bridgeRelayEntry(entry, true, d.text, d.lowData, null,
+                            d.relayed);
                 }
             } else {
                 JSONObject entry = WalkieStore.entry("voice", from, "", "",
                         d.samples, "Internet", mine, "sent");
                 RelayIngest.stampEntry(entry, m, d);
+                if (d.relayed != null) {
+                    BridgeRule.stampRelayedEntry(entry, d.relayed);
+                    try {
+                        entry.put("viaPub", m.sender);
+                    } catch (Exception ignored) {
+                    }
+                } else {
+                    BridgeRule.stampBid(entry, bid);
+                }
                 voiceCache.put(entry.optLong("ts"), d.plain);
                 appendEntry(entry);
+                if (!mine) {
+                    bridgeRelayEntry(entry, false, "", false, d.plain,
+                            d.relayed);
+                }
             }
         }
     }

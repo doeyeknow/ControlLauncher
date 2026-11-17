@@ -72,6 +72,8 @@ public class SettingsActivity extends ThemedActivity {
     private TextView adminSummary;
     private TextView homeSummary;
     private TextView profileSummary;
+    private TextView updateSummary;
+    private TextView dictSummary;
     private TextView themeSummary;
     private Switch clockSwitch;
     private Switch quietSwitch;
@@ -315,6 +317,21 @@ public class SettingsActivity extends ThemedActivity {
                     refreshSummaries();
                 });
         overlaySummary = lastSummary(overlay);
+        // v1.44: this summary carries TWO logical lines — the
+        // state line plus the diagnostics line (statusLine2) —
+        // so it must wrap, not single-line. switchRow sets
+        // singleLine + ellipsize on every summary; undo the
+        // single-line part here and cap at 2 display lines,
+        // the v1.39 bridge-row treatment
+        // (DeepControlActivity.hubStatusRow: setMaxLines(2) +
+        // ellipsize END, never setSingleLine). On 1.43 the
+        // single-line summary hid the diagnostics entirely:
+        // Adam reported the row showed no text at all. The
+        // ellipsize set by switchRow stays, so an over-long
+        // diagnostic truncates with "…" instead of growing
+        // the row. No other row is touched.
+        overlaySummary.setSingleLine(false);
+        overlaySummary.setMaxLines(2);
         overlayPermissionSummary = navRow(overlay, overlayHeader,
                 PageGlyphs.SETTINGS, "Overlay permission",
                 "overlay permission draw over other apps display",
@@ -384,6 +401,38 @@ public class SettingsActivity extends ThemedActivity {
         navRow(browser, browserHeader, PageGlyphs.BROWSER, "Bookmarks",
                 "browser bookmarks saved pages",
                 () -> startActivity(new Intent(this, BookmarksActivity.class)));
+
+        // ---- Share ----
+        View shareHeader = addGroup(root, "Share");
+        LinearLayout share = groupCard(root);
+        navRow(share, shareHeader, PageGlyphs.APPS, "Share an app",
+                "share app apk nearby hotspot qr bluetooth quick share",
+                () -> startActivity(new Intent(this, ShareAppActivity.class)));
+
+        // ---- Updates (v1.27) ----
+        // The whole update flow lives on this one row: it shows
+        // the installed version, whether a newer one is
+        // available, download progress, verification, and the
+        // install step. No popups, no banners anywhere else.
+        View updateHeader = addGroup(root, "Updates");
+        LinearLayout update = groupCard(root);
+        updateSummary = navRow(update, updateHeader, PageGlyphs.INFO,
+                "Check for updates",
+                "update version check download install new version apk",
+                () -> UpdateManager.onRowTap(this));
+
+        // ---- Dictionary (v1.29) ----
+        // The word list behind message compression, fetched
+        // from GitHub in the background. The row shows the
+        // version, the word count, and the last-check
+        // status; tapping checks now. Learned words stay
+        // on this phone — nothing here uploads anything.
+        View dictHeader = addGroup(root, "Dictionary");
+        LinearLayout dict = groupCard(root);
+        dictSummary = navRow(dict, dictHeader, PageGlyphs.INFO,
+                "Word dictionary",
+                "dictionary words list check download compress",
+                () -> DictStore.checkNow(this::refreshSummariesIfAlive));
 
         // ---- About ----
         View aboutHeader = addGroup(root, "About");
@@ -627,7 +676,9 @@ public class SettingsActivity extends ThemedActivity {
                 overlaySwitch.setChecked(OverlayRingService.switchOn(this));
             }
             if (overlaySummary != null) {
-                overlaySummary.setText(OverlayRingService.stateLine(this));
+                String line2 = OverlayRingService.statusLine2(this);
+                overlaySummary.setText(OverlayRingService.stateLine(this)
+                        + (line2.isEmpty() ? "" : "\n" + line2));
             }
             if (overlayPermissionSummary != null) {
                 overlayPermissionSummary.setText(OverlayRingService.overlayGranted(this)
@@ -650,6 +701,9 @@ public class SettingsActivity extends ThemedActivity {
             if (profileSummary != null) {
                 profileSummary.setText(Profile.displayName(this)
                         + " · encrypted export / import");
+            }
+            if (dictSummary != null) {
+                dictSummary.setText(DictStore.statusLine());
             }
             if (clockSwitch != null) clockSwitch.setChecked(Prefs.showClock(this));
             if (themeSwitch != null) themeSwitch.setChecked(Ui.isLightTheme(this));
@@ -833,5 +887,18 @@ public class SettingsActivity extends ThemedActivity {
         OverlayRingService.reconcile(this, this::refreshSummariesIfAlive);
         BridgeWatchdogService.kick(this);
         refreshSummaries();
+        // The update row drives itself through the manager's
+        // listener: returning from the install-permission
+        // screen re-renders it with the grant's new state.
+        UpdateManager.setListener(line -> {
+            if (updateSummary != null) updateSummary.setText(line);
+        });
+        UpdateManager.refreshRow(this);
+    }
+
+    @Override
+    protected void onPause() {
+        UpdateManager.setListener(null);
+        super.onPause();
     }
 }

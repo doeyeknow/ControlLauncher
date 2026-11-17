@@ -1,10 +1,10 @@
 # Control — build notes
 
 Working name **Control**, applicationId `app.control.launcher` (the label can
-change later; the applicationId should not). **Version 1.19 (versionCode 23)** —
+change later; the applicationId should not). **Version 1.44 (versionCode 49)** —
 see the version sections below; min SDK 26, target SDK 34. Pure Java; the
 external dependencies are ZXing core 3.5.3 (`libs/zxing-core.jar`, QR —
-profile transfer only since v1.8), Bouncy Castle 1.84 (`libs/bc*.jar`,
+profile transfer since v1.8, hotspot sharing since v1.25), Bouncy Castle 1.84 (`libs/bc*.jar`,
 the TLS 1.3 stack for ADB wireless pairing/connect since v1.2), and since
 v1.11 Vosk 0.3.45 + JNA 5.19.1 (`libs/vosk-classes.jar`,
 `libs/jna-classes.jar`, native libs in `native-libs/` — on-device speech
@@ -673,6 +673,3139 @@ certificate. **Still unproven until Adam's phone**: whether the
 BC connect handshake completes against his real adbd — that is
 precisely the on-device question v1.3 left open, and if it still
 fails, the stage-2 line now names the exact BC exception.
+
+## v1.44 (2026-11-17) — the hold-anywhere diagnostic line, made visible
+
+Adam, on 1.43, 2026-11-17 13:06–13:10: the ring STILL shows
+only inside the launcher, never over other apps. Bridge is
+v9 (current), the Settings hold-anywhere row says On — so
+switch, permission, bridge version, and service liveness all
+pass, yet no ring. Asked for the v1.43 second diagnostic
+line, Adam answered: "It isnt showing any text." PROTOCOL v10
+— BRIDGE RESTART REQUIRED once after installing (the
+watchdog restarts a stale bridge by itself within minutes,
+or Deep view → Restart; the Settings row names the stale
+bridge until then).
+
+DEFECT 1 — CONFIRMED: THE DIAGNOSTIC LINE WAS
+UNDISPLAYABLE. OverlayRingService.statusLine2 returned
+"watch … · hold … · window …" and SettingsActivity set the
+overlay summary to stateLine + "\n" + line2 — but the
+overlay row is built by switchRow, whose summary TextView is
+setSingleLine(true) + ellipsize END, so the second line
+could never be seen. The v1.43 diagnosis channel was dead
+on arrival, which is why the 1.43 failure stayed invisible.
+FIX: the overlay row's summary — and only that row's — now
+undoes the single-line setting and caps at 2 display lines
+(setSingleLine(false) + setMaxLines(2), ellipsize END kept),
+the v1.39 bridge-row treatment
+(DeepControlActivity.hubStatusRow). Verified by inspection:
+the row height is WRAP_CONTENT with a 56dp minimum, so two
+lines grow the row; refreshSummaries only ever setText on
+this view; no other code re-sets singleLine on it; Ui.text
+sets no line constraint. The other rows keep their
+single-line summaries.
+
+DEFECT 2 — ROOT CAUSE STILL UNKNOWN: THE NEXT ATTEMPT MUST
+NAME THE STAGE. A fresh full re-audit of the chain
+(TouchDeviceProbe, HoldEventParser, ShellBridgeMain's
+streamHoldWatch + evaluator thread, HoldWatchClient,
+HoldCoordinateMapper, OverlayRingService reconcile/watch/
+showOverlay, CircleMenuView's open-count) found NO concrete
+defect — see the re-audit note below. The runtime facts
+(picked device, frames arriving, holds firing, window
+result) were unknown, so this version makes them visible
+instead of guessing a fix. New bridge op HOLD_WATCH_STATUS
+(protocol v10): the picked input device ("path (name)"),
+the frames and holds the current/last watch saw, whether a
+watch is streaming, and any probe failure. Counts and names
+only — never coordinates, never touch trails. The parser
+gained synchronized frame/hold counters (framesSeen counts
+SYN_REPORT boundaries; holdsFired counts fires, frame-path
+or timer-path); the status op reads a live watch's counters
+straight from its parser via a volatile reference, and the
+watch's finally block snapshots the same counters once at
+watch end, so the last watch's data survives its death. The
+Settings second line is now one compact display line —
+"watch running · sec_touchscreen · 0 holds · 12 frames",
+with a window failure appended when one is recorded — and
+falls back to the v1.43 app-side wording when no
+bridge-side data exists (old bridge, failed fetch). The
+line composition moved to the pure-Java HoldWatchStatus
+(parse + deviceShort + formatLine), harness-pinned; the
+app fetches the status in reconcile(), only when the switch
+is on and the bridge is CURRENT, before the ping-done
+callback re-renders the row.
+
+WHY A NEW OP (AND THE BUMP) WAS GENUINELY NEEDED: the only
+existing carrier for the picked device was the bridge's
+stderr log file (/data/local/tmp/control-bridge.log),
+readable only over an ADB shell connection (Diagnose) —
+and the ADB connection is itself broken on Adam's phone
+(the terminal cannot connect; see the terminal/ADB thread).
+The HOLD_WATCH stream carries hold lines only and cannot be
+queried. No existing path could carry device/counts to the
+Settings row, so HOLD_WATCH_STATUS + VERSION 10 +
+HOLD_WATCH_VERSION 10, per the bump-when-an-op-is-added
+rule. A v9 bridge refuses the op with the allowlist error;
+the client never asks a non-CURRENT bridge, so no
+ambiguity.
+
+RE-AUDIT NOTE (v1.44, no defect found — the diagnostics are
+the deliverable): the probe's getevent -p parsing handles
+the real Samsung layout (axis entries sharing the EV_ABS
+header line; BTN_TOUCH on the EV_KEY line); the parser's
+MT/ST handling, slot tracking, ffffffff lift, anchor/cancel
+/fire state machine, and CLOCK_MONOTONIC timer comparison
+all read correctly; the evaluator thread and parser entry
+points are synchronized; the client's ack handling,
+out-of-range hold filtering, and rotation-fresh mapping
+read correctly; the service lifecycle, reconcile triggers,
+and window params read correctly; CircleMenuView's
+open-count is balanced (showAt increments only on a
+closed→open transition, close decrements only while open),
+so a stuck suppression count has no code path. The live
+hypotheses the diagnostics will now discriminate: (a) the
+probe picked the wrong device (the name in the line says
+which); (b) the stream is dead (0 frames); (c) the parser
+never fires on this hardware's stream shape (frames > 0,
+holds 0); (d) holds fire bridge-side but the client drops
+them as out-of-range (holds > 0, "no hold seen yet"
+app-side — possible if the -p axis ranges mismatch the
+stream values); (e) the window is rejected (the window
+part names it).
+
+NO AccessibilityService — the hold detection stays bridge
+getevent only, as always. NO new permission (still 28).
+NO manifest change. The 'override' read is untouched
+(still exactly one place in ShellBridgeMain).
+WalletCrypto/WalletStore untouched.
+
+Harness: HoldWatchHarness gains leg 7 (parser counters) and
+leg 8 (status parse/format, 56 new checks); BridgeGate and
+DeepControl legs updated to v10. All 29 suites green — see
+the harness report in the delivery.
+
+On-device checklist:
+- After installing, restart the bridge once (or wait for the
+  watchdog — the Settings row says when the bridge is stale).
+- Open Settings: the hold-anywhere row now shows TWO lines.
+  The second line names the device and the counts — read it
+  and report it exactly.
+- Hold a finger still for a second over another app, then
+  open Settings again and read the second line: frames 0
+  means the stream is dead or the device is wrong; frames
+  > 0 with 0 holds means the hold never fires; holds > 0
+  with no ring means the hold arrived but the ring was
+  dropped or the window failed (the line names a window
+  failure when there is one).
+- The ring still opens inside the launcher (chrome long-press).
+- Report the second line's exact text after a hold attempt —
+  that line is the diagnosis.
+
+## v1.43 (2026-11-17) — the circle menu opens over other apps
+
+Adam, 2026-11-17 12:39: "The circle menu doesnt open over other
+apps, only in the launcher." PROTOCOL v9 — BRIDGE RESTART
+REQUIRED once after installing (the watchdog restarts a stale
+bridge by itself within minutes, or Deep view → Restart; the
+Settings hold-anywhere row names the stale bridge until then).
+
+THE SPLIT, confirmed from code: the in-launcher menu is a
+separate path — the pager's chrome long-press calls
+CircleMenuView.showAt directly (MainActivity.java), needing no
+service, no bridge, and no overlay permission. Over other apps
+the ring comes only from OverlayRingService (foreground
+service) + the bridge's streaming HOLD_WATCH op + a
+TYPE_APPLICATION_OVERLAY window. So every defect below is in
+the service/watch/window path, and the in-launcher menu was
+never evidence the overlay worked.
+
+DEFECT 1 — THE HOLD COULD NEVER FIRE (the main defect).
+HoldEventParser judged the hold threshold ONLY at SYN_REPORT
+frame boundaries (feedEvent → evaluateFrame). Hardware that
+reports only on change sends no frames for a perfectly still
+finger: the anchor was set at the down frame, no later frame
+ever arrived, and the lift cleared the state — so the hold
+never fired, no hold line ever crossed the socket, and the
+ring never opened over other apps, while every gate (switch,
+permission, bridge CURRENT) passed and the Settings row said
+On. FIX: HoldEventParser.evaluateAt(timeMs) judges the same
+threshold at an explicit time, and the bridge runs a 100ms
+timer thread calling it with SystemClock.uptimeMillis() —
+CLOCK_MONOTONIC, the same domain getevent -t timestamps live
+in, so the comparison is unchanged. On streaming hardware the
+frame path fires first and the fired flag blocks a second
+fire; on change-only hardware the timer is the only
+evaluation that can fire. Parser entry points are synchronized
+(the event thread feeds frames while the timer thread
+evaluates). The wire shape is unchanged (same hold lines), but
+the fix lives in the bridge process, so the protocol bumped
+to v9 and the version gate honestly reports the old running
+bridge as STALE until it restarts. The bridge log gains the
+picked device line ("Hold watch device: /dev/input/eventN
+(name)") so a wrong pick is visible in Diagnose.
+
+DEFECT 2 — THE SERVICE DIED AND NEVER CAME BACK.
+OverlayRingService.onEnded stops the service whenever its
+watch ends (bridge death, reboot, getevent end), and
+reconcile() was called ONLY from Settings and Deep view — not
+from boot, not from the watchdog after a bridge restart, not
+from the launcher. After any reboot the watchdog restarted
+the bridge but the ring service stayed dead until Adam opened
+Settings or Deep view. FIX: reconcile() is now also called
+from MainActivity.onResume (every foregrounding; one
+local-socket ping, and starting an already-running service is
+a no-op), from BridgeWatchdogService after a successful bridge
+restart, and from BootReceiver.
+
+DEFECT 3 — THE WINDOW FAILURE WAS SILENT. showOverlay caught
+every exception from the overlay-window add and dropped the
+ring with no log and no state, so a rejected window was
+indistinguishable from a dead watch. FIX: the failure is
+logged to the app log and recorded; a successful add clears
+it. The Settings hold-anywhere summary gains a second line
+(OverlayRingService.statusLine2): watch state + last end
+reason, whether a hold ever arrived, and the last window
+failure — no coordinates, ever. The bridge log's "Hold watch
+starting / device / ended" lines remain the bridge-side
+diagnosis.
+
+HARDENING — A STALE IN-LAUNCHER MENU SUPPRESSED THE RING.
+The overlay refuses to open while CircleMenuView reports any
+menu open, and MainActivity never closed its menu on pause —
+a menu left open across a backgrounding kept the shared count
+raised and suppressed every later hold over other apps. FIX:
+MainActivity.onPause now closes an open menu (and clears the
+pager's menu-open state). No behavior change while the
+launcher is in the foreground.
+
+NO AccessibilityService — the hold detection stays bridge
+getevent only, as always. NO new permission (still 28;
+SYSTEM_ALERT_WINDOW was already declared). The 'override' read
+is untouched (still exactly one place in ShellBridgeMain).
+WalletCrypto/WalletStore untouched.
+
+Harness: HoldWatchHarness gains leg 6 (timer evaluation: fires
+with no frames, never early, never after cancel/lift, never
+twice, second touch fires, single-touch fires); BridgeGate and
+DeepControl legs updated to v9. All 29 suites green — see the
+harness report in the delivery.
+
+On-device checklist:
+- After installing, restart the bridge once (or wait for the
+  watchdog — the Settings row says when the bridge is stale).
+- Hold a finger still for a second over another app: the ring
+  opens, centered on the hold.
+- The ring still opens inside the launcher (chrome long-press).
+- Background the launcher and return: the ring still opens over
+  other apps (no Settings visit needed).
+- The Settings hold-anywhere row's second line matches reality
+  (watch running, last hold time, window ok).
+
+## v1.42 (2026-11-17) — all text removed from the wallet screen
+
+Adam, 2026-11-17 12:34: "Remove all the text from the launcher
+wallet."
+
+The rule applied: if text explains, describes, reassures, or
+instructs beyond the control itself, it goes — ENTIRELY, not
+moved behind "?" modals (unlike the v1.37/v1.38 Deep-view text
+rule, which only relocated explanations). What stays, kept
+minimal: the controls' own labels, card identifiers, and text
+that reports a result or a failure. Every function is
+unchanged; WalletCrypto/WalletStore logic is untouched — this
+is a UI-text removal only, in WalletActivity.java alone. NO
+protocol change (still v8 — no bridge restart needed), NO new
+permission.
+
+REMOVED, exactly:
+- The intro paragraph under the "Wallet" title ("Your cards
+  live only on this phone, sealed with a key Android's
+  keystore holds. Control never stores the security code, and
+  cards never leave in a profile export — this wallet is
+  device-local. Showing a full card number asks for your
+  device credential first.").
+- The Pay paragraph ("Pay opens your wallet app — Google Pay
+  or Samsung Wallet — where the tap happens. Control can't
+  choose a card there; pick the card in the wallet app.").
+- The card-count line ("1 card stored on this phone." / "N
+  cards stored on this phone.") — the list speaks for itself,
+  and "stored on this phone" was reassurance.
+- The empty-state line ("No cards yet. Add one to keep it on
+  this phone."). An empty wallet now shows the Add control and
+  nothing else; the status line is left blank except for the
+  corrupt-vault failure (kept, below).
+- The add/edit form note, both variants ("The number is
+  encrypted on this phone before it is stored. Control never
+  asks for or stores the security code." / "The card number
+  can't be changed — delete this card and add it again to
+  change it."). In edit mode the number field is simply
+  absent.
+- The "No wallet app installed" dialog message ("Pay needs
+  Google Pay or Samsung Wallet — the tap happens there, not in
+  Control. Install one of them to pay."). The title plus the
+  Get-Google-Pay / Get-Samsung-Wallet buttons carry it.
+- The policy clause from the no-screen-lock toast ("Control
+  won't show a card number without your device credential") —
+  trimmed to "Set a screen lock first."
+- The instructional clause from the unchosen pay-app line
+  ("you'll pick on first Pay") — trimmed to "Pay app: not
+  chosen."
+
+KEPT, and why:
+- Control labels: "Wallet" title, "Pay" / "Cards" one-word
+  section headers, Pay, Change pay app, Add a card, Show /
+  Hide, Edit, Delete, Add / Save / Cancel, Close, Create new
+  key, Pay with, Get Google Pay / Get Samsung Wallet, and the
+  field hints (Nickname, Name on card, Card number, Expiry
+  month/year). The nickname hint keeps its "(e.g. Everyday)"
+  example — it is part of the label, distinguishing the
+  nickname from the name on the card.
+- Card identifiers: nickname, network, masked number, name +
+  expiry on each row.
+- Everything reporting a result or a failure, verbatim: the
+  corrupt-vault line ("Stored cards couldn't be read. Nothing
+  was changed.") and its "Start fresh (deletes stored cards)"
+  button; the credential-gate prompt ("Show card number" +
+  nickname/last4) and its outcomes; the reveal/unlock failures;
+  all five form-validation toasts; the store-error toasts;
+  the pay-app state lines ("Pay app: …", "No wallet app found
+  on this phone."); the "couldn't be opened" toasts.
+- The full save-failure dialog (v1.39/v1.40) is untouched —
+  title, complete per-attempt text, and the "First attempt:" /
+  "After creating a new key:" section labels. It is the
+  diagnosis channel.
+- The key-regeneration confirm (v1.39) is untouched — its
+  wording reports a consequence, not a description.
+- The delete confirm is untouched — "will be removed from
+  this phone. This can't be undone." names the consequence of
+  the action being confirmed.
+- The class-level honesty-rules comment in WalletActivity.java
+  was reworded: the rules are enforced in code and no longer
+  "stated on the screen itself". The rules themselves are
+  unchanged and still documented there.
+
+Judgment calls: (1) the count line and the empty-state line
+were removed rather than shortened to bare counts/words — the
+order was "remove all the text", and the list and the Add
+button already convey both states. (2) The "Pay app: …" line
+was kept: without it there is no visible sign of which app
+Pay will open, and it is a state report, not an explanation.
+(3) No Wallet-harness leg asserted on any removed copy — the
+legs pin WalletCrypto/WalletCards/WalletKeyRecovery logic and
+the kept confirm copy, so no harness changes were needed.
+
+On-device checklist: the wallet opens with controls only and
+no paragraphs; add a card works end to end; reveal works
+(credential gate, 30-second re-mask); a save failure still
+shows the full error dialog; an empty wallet shows only the
+add control; the Pay section shows Pay + the pay-app line and
+nothing else.
+
+## v1.41 (2026-11-17) — uninstall from the app drawer by long-pressing
+
+Adam, 2026-11-17 12:18: "I want to be able to uninstall an app
+from the app drawer by long pressing" + "Add uninstall to that
+menu."
+
+What the code already had: the long-press DID open a menu — a
+`PopupMenu` (v1.22, the Connections pattern) with the favorite
+toggle and "View activities". Uninstall joins that menu as the
+last item. The existing items and their behavior are untouched;
+the menu-building code was restructured only so the item list
+comes from one place (below).
+
+Mechanism — the standard system flow, exactly what stock
+launchers do: tapping Uninstall fires an `ACTION_DELETE` intent
+with the `package:` URI for the app. Android itself shows the
+confirm dialog and performs the removal. NO bridge involvement,
+NO new permission, NO protocol change (still v8 — no bridge
+restart needed). Its honest limits are Android's own: for a
+system app the uninstaller offers only what it offers — an
+updates removal, or a refusal — and says so itself; the app
+never claims otherwise. The one defensive branch: if no
+activity could handle the intent (essentially impossible — the
+package installer is a system component), a toast says Android
+could not open the uninstaller instead of crashing.
+
+Exclusion: Uninstall is NEVER offered for Control itself
+(`app.control.launcher`). The decision reuses
+`ProtectedOverride.isOwnPackage` — the same single source of
+truth as the bridge lockout: the launcher must not offer to
+remove itself from its own drawer. A null or empty package also
+gets no item (fail closed; unreachable in production).
+
+The menu-item decision lives in the new pure-Java `DrawerMenu`
+(items in display order, exact labels, action keys, the
+exclusion), pinned by the new `DrawerMenuHarness` (26/26; added
+to `run-launcher-harnesses.sh`, now 29 suites). The intent
+launch itself is Android-only and proven on-device.
+
+Refresh after uninstall: the sheet deliberately stays OPEN
+while the system flow runs. The removal reaches it through the
+existing path — `PackageChangeReceiver` (manifest-registered
+for `ACTION_PACKAGE_REMOVED`) → `AppListStore.notePackageChanged`
+→ background `refreshAsync` → the sheet's store listener, which
+rebuilds the grid from the fresh cache — so the app is visibly
+gone when the user returns. A cancelled uninstall broadcasts
+nothing and changes nothing. No resume-refresh was added: the
+receiver + listener path already covers it, and `show()` also
+reloads from the cache on every open.
+
+No audit-log entry: this is a user-confirmed system flow, not a
+bridge write — Android's own dialog is the confirmation and
+the record. Unchanged pre-existing behavior, noted only so it
+is not mistaken for a regression: uninstalling a favorited app
+leaves a stale entry in the favorites set, exactly as
+uninstalling from Settings does today; the set is only ever
+pruned by the favorite toggle itself.
+
+Files changed: new `DrawerMenu.java` + `harness/DrawerMenuHarness.java`;
+`AppsSheetView.java` (menu built from `DrawerMenu`, Uninstall
+action); `build-apk.sh` (version only); `BUILD_NOTES.md`;
+`run-launcher-harnesses.sh` (DrawerMenu added). Untouched, as
+required: `ShellBridgeMain`, `BridgeOps`, `BridgeGate`,
+`WalletCrypto`, the `'override'` read.
+
+**On-device checklist**: long-press a user-installed app → the
+menu shows Uninstall last → tap it → Android's own dialog →
+confirm → the app is gone and the drawer list refreshes without
+reopening the sheet; cancel → nothing happens, the app stays;
+long-press Control → no Uninstall item (favorites + activities
+only); long-press a system app → Android's own behavior
+(updates removal or refusal), honestly reported by the system
+dialog; favorites toggle and View activities behave exactly as
+before.
+
+## v1.40 (2026-11-17) — wallet root cause fixed: Keystore-generated IV on encrypt
+
+Adam, 2026-11-17 12:11, after v1.39 created a fresh key and saving
+still failed — the full-error dialog v1.39 added delivered the
+decisive evidence verbatim:
+
+> AllFailedException: No cipher worked:
+> default=InvalidAlgorithmParameterException: Caller-provided IV not
+> permitted; androidopenssl=InvalidKeyException: key.getEncoded()
+> == null; keystore=NoSuchAlgorithmException: Provider
+> AndroidKeyStore does not provide AES/GCM/NoPadding
+
+ROOT CAUSE (proven, not a theory): every version since v1.7
+initialized encryption with a caller-provided IV — a fresh random
+IV wrapped in `GCMParameterSpec`. A Keystore key generated with
+`setRandomizedEncryptionRequired(true)` (see `WalletStore`) REFUSES
+caller-provided IVs on encrypt: the Keystore must generate the IV
+itself. That is why saving a card NEVER worked on Adam's phone, on
+any version, with any key. The v1.39 bad-key theory is DISPROVEN:
+the fresh key failed identically, with the same caller-IV refusal.
+The other two suppliers are expected dead ends for a Keystore key
+(AndroidOpenSSL needs key bytes Keystore keys never expose; the
+AndroidKeyStore provider does not expose this Cipher lookup on his
+device) — they stay as fallbacks; the default supplier is the only
+viable path, and it is the one the caller-IV init broke.
+
+THE FIX — `WalletCrypto.java` only: `encryptOnce` now initializes
+with NO parameters (`cipher.init(Cipher.ENCRYPT_MODE, key)`) and
+reads the IV back via `cipher.getIV()`. If the cipher yields no
+IV or one that is not exactly 12 bytes, the attempt fails
+honestly and the next supplier is tried — the wire form assumes a
+12-byte IV. The wire form IV‖ciphertext+tag is UNCHANGED, so
+anything sealed stays readable. Decrypt is UNCHANGED: it MUST
+supply the stored IV via `GCMParameterSpec`, which the Keystore
+permits — the no-caller-IV rule applies to encryption with
+randomized-encryption-required keys only.
+
+KEPT FROM v1.39, untouched: the three suppliers in order, the
+`AllFailedException` type + full-detail failure dialog, and the
+regenerateKey-on-save-failure logic. Regeneration is no longer the
+fix for this failure — it is harmless, and still covers a
+genuinely-bad-key case, so it stays; the recovery decision rule
+and its harness legs are unchanged.
+
+NO PROTOCOL CHANGE: still v8. NO bridge restart needed after
+installing. ShellBridgeMain, BridgeOps, BridgeGate, and the
+`'override'` read are untouched.
+
+Harness: WalletHarness 77/77 (was 71; +6 new legs in leg 9 pinning
+the no-IV-init round-trip, provider IVs differing between
+encryptions, the 12-byte IV prefix, a tampered IV prefix being
+rejected, an old-way blob — caller-provided IV — still decrypting
+through the unchanged decrypt path, and the all-failed message
+still naming all three attempts). Full sweep green, all 28 suites:
+AdbConnect 15, AppActivities 42, AppListCodec 22, AudioModem 71,
+BridgeGate 57, BridgeOps 440, Bridging 157, Camera 461,
+ChangeJournal 148, DeepControl 604, History 78, HoldWatch 64,
+LowData 129, Nat 190, NfcArm 40, Relay 28, RingMath 101, Setup 85,
+Share 145, Subscription 75, Terminal 29, TerminalScroll 32,
+Updater 143, WalkieLayout 30, WalkieMode 70, Wallet 77, Watchdog
+58, WordDict 497. (One sweep run showed Relay rc=1 because the
+[::1]:8898 proxy relay was not running — environmental; restarted
+and Relay passed 28/28. The harness proves the no-IV-init path
+with a JVM software key; that a real Keystore key accepts
+no-parameter init is proven on-device only.)
+
+On-device checklist: add a card → saves; reveal shows the number;
+restart the app → the card still opens; add a second card →
+saves; if it still fails → the dialog's full text is the report.
+
+## v1.39 (2026-11-16) — Deep view hub in the Settings style + meters header; wallet key-regeneration fix
+
+Adam, two orders folded into one version: (1) 22:07 — "The deep view
+window has way too much text. I want it to look like the main settings
+window. A button on each row with an icon, and status information for
+memory, battery, storage, data, and processing meters on the top of
+the page." (2) 22:10 — "The wallet wont let me add a card still."
+Disjoint files; the Deep view redesign was not disturbed by the
+wallet fix.
+
+NO PROTOCOL CHANGE: still v8. NO bridge restart needed after
+installing. ShellBridgeMain, BridgeOps, BridgeGate versions, and the
+`'override'` read are untouched.
+
+### Deep view hub — Settings-style rows + meters
+
+DESIGN SOURCE: the main Settings window (`SettingsActivity`).
+The hub now mirrors its row pattern exactly: a rounded-stroke card
+(SURFACE fill, 16dp radius, LINE border) holding 56dp rows — a 24dp
+glyph bitmap drawn from `PageGlyphs` with DIM paint, a title, and a
+chevron "›", with dividers between rows at 52dp left margin. The
+`glyphIcon()` helper is duplicated in `DeepControlActivity`
+(Settings' is private; no `Ui` refactor). Icons reuse existing
+`PageGlyphs` constants only — no new assets, no icon font — the same
+reuse Settings itself does (BELL/SHIELD/ACTIVITY/CHAT/SETTINGS/INFO
+repeat there too).
+
+Hub order, top to bottom: the unchanged title row ("Deep controls" +
+"?" About modal) → the meters card ("Status" header + Refresh button)
+→ the status card (Bridge row, Protected packages switch row, stale-
+restart row) → the groups card (18 rows, same order as before).
+Group rows are TITLE-ONLY (no summary line): the titles are the
+controls' names, and live state belongs on the status card — a
+judgment call, documented here. Tapping a row opens that group's
+page; back returns to the hub. Group pages keep their v1.38 controls,
+confirmations, refuse-lists, audit, journaling, no-long-text rule,
+and "?" modals EXACTLY as they are. The text rule stands: no
+paragraphs on the hub or group pages; explanations stay behind "?"
+modals.
+
+The Bridge row's summary wraps to 2 lines (not single-line) so the
+shell UID in the ping text is never cut off — the parent thread
+needs Adam to report the UID. The ping text itself is untouched.
+The Protected switch moved onto the hub as a settings-style switch
+row, keeping its exact v1.36 behavior: default off, strong confirm
+to enable, locked unless the bridge is CURRENT, audit-logged, the
+`syncingProtectedSwitch` guard, and `refreshProtectedSwitch()`
+gating. The Protected packages group page keeps its header state,
+status line, and "?" info, plus one short pointer line: "The switch
+lives on the Deep controls hub." The stale-restart row is a divider
++ clickable row inside the status card (a `staleRow` column
+container, GONE by default); `ping()` and `restartStaleBridge()`
+visibility code is untouched.
+
+METERS — all reads app-side via platform APIs, NO bridge calls, so
+the meters work even when the bridge is off. Refresh on resume and
+via the Refresh button; reads run on a background thread (the CPU
+read sleeps 300ms between samples). Each meter shows a bar + short
+numbers (e.g. "6.1 / 8.0 GB"):
+- Memory: `ActivityManager.MemoryInfo` (avail/total), used/total.
+- Battery: `BatteryManager` capacity + charging state ("82%",
+  " · Charging", " · Full" at 100% charging); warns (SIGNAL tint)
+  below 20% while not charging.
+- Storage: `StatFs` on the data partition, used/total.
+- Data: `TrafficStats` device totals, "RX … · TX … · since boot";
+  the bar is the mobile share of the total when mobile counters
+  are readable, and the numbers say " · mobile share unknown"
+  when they are not.
+- Processing: overall CPU load from two `/proc/stat` samples
+  (aggregate "cpu" line only, idle = idle + iowait), labeled
+  "63% · approx" — approximate, said so on the label.
+
+HONEST FALLBACKS: any meter that cannot be read shows
+"Unavailable" — never a fake number, never a zero presented as
+real; an unsupported bar fraction is NaN (empty track, the numbers
+say why). The shaping/formatting is pure Java in `DeviceMeters`
+(formatBytes, formatUsedTotal, usedFraction, CPU parse + usage,
+battery/traffic labels) and harness-pinned in DeepControlHarness
+leg 18; the Android reads live in `DeviceMeterReads` and are
+proven by construction + the on-device checklist below. The hub
+row structure is pure Java in `DeepHub` (18 groups, glyph table,
+INFO fallback for out-of-range indices) and harness-pinned in
+DeepControlHarness leg 19.
+
+ON-DEVICE CHECKLIST (hub): every row has an icon and opens the
+right page; back returns to the hub; meters show plausible numbers
+matching Settings/About values; meters work with the bridge off;
+the stale bridge still shows the restart row; Protected switch
+behavior is unchanged (confirm, lock on stale bridge, audit);
+no long text anywhere on the hub or group pages.
+
+### Wallet — key regeneration, third supplier, full failure text
+
+THE SAGA (see `WalletCrypto.java`'s header): saving a card fails
+with "No cipher worked: default=…; keystore=…". The
+`Cipher.getInstance("AES/GCM/NoPadding", "AndroidKeyStore")`
+lookup is KNOWN to throw NoSuchAlgorithmException on Adam's
+Samsung A16 (Android 16), and the default supplier fails too,
+identically across versions. The per-attempt detail never reached
+us because the UI truncated it to 160 chars.
+
+THE CAUSE THEORY — STATED AS THEORY, UNCONFIRMED: the persisted
+Keystore key entry itself is unusable. `WalletStore.key()` returns
+the existing entry forever, so a bad entry fails every version
+identically at cipher init under every provider — which matches
+everything observed. Saving has NEVER worked on his phone, so the
+vault is almost certainly empty — but the fix does not assume it.
+
+THE FIX:
+1. KEY REGENERATION, ONCE, ON THE SAVE PATH ONLY.
+   `WalletStore.regenerateKey()` deletes the entry and generates a
+   fresh key with the EXACT existing spec (same alias
+   `control-wallet`, AES-256, GCM, no padding, randomized
+   encryption required, not auth-bound — the spec is factored
+   into one private `generateKey()` so creation and regeneration
+   can never drift). When encrypt throws all-failed on the save
+   path: if the vault holds NO cards, regenerate once and retry
+   the save once, silently. If the vault holds ANY cards — or the
+   card count itself cannot be read (fail closed) — show a
+   confirm dialog naming the consequence plainly ("The encryption
+   key can't be used. Creating a new key means previously saved
+   cards will stop opening and will need to be re-added.") and
+   regenerate + retry only on confirmation. Never regenerate on
+   the decrypt/reveal path (`unseal` untouched). Never loop: one
+   regeneration per save attempt, then the failure stands. The
+   decision lives in pure-Java `WalletKeyRecovery` and is
+   harness-pinned (WalletHarness leg 8); the Android Keystore
+   calls are Android-only and proven on-device.
+2. THIRD SUPPLIER: `WalletCrypto` now tries default, then an
+   explicit "AndroidOpenSSL" supplier, then keystore. It costs
+   nothing and distinguishes provider-resolution failures from
+   key failures in the diagnostics. The supplier-seam structure
+   and harness substitution pattern are intact; `AllFailedException`
+   is now a named type (the save path keys regeneration on it).
+   Per-attempt detail grows 28 → 120 chars and the safety cap
+   160 → 2000 (a bound only — the dialog shows the full text).
+3. FULL FAILURE VISIBILITY: when a save still fails, the COMPLETE
+   error text appears in a scrollable, text-selectable dialog
+   (the v1.38 refusal-dialog pattern) instead of the truncated
+   toast — including BOTH attempts' details when a regeneration
+   happened (first attempt vs post-regeneration attempt, labeled)
+   plus the cause chain (cause class + full message). The wire
+   form (IV‖ciphertext+tag) is unchanged, so anything ever sealed
+   stays readable under a good key. The delete/edit paths keep
+   the old truncated toast — they involve no encryption. The edit
+   path (`updateMeta`) is unchanged: no encrypt, no regeneration.
+
+HARNESS: WalletHarness leg 6 updated for three suppliers (order,
+first-success-stops, all-failed message naming all three in full,
+long detail preserved, tampered blob naming all three); leg 7 pins
+that each of the three positions can win; leg 8 pins the recovery
+decision truth table + confirm copy + the AllFailedException type.
+Encrypt/decrypt round-trip unchanged.
+
+ON-DEVICE CHECKLIST (wallet): add a card → saves; add a second
+card → saves; reveal shows the number; restart the app → cards
+still open; if it still fails → the dialog shows the full
+per-attempt text to report.
+
+## v1.38 (2026-11-16) — launch refusals readable, scrollable short confirms, Deep view pages, flags picker + toggles
+
+Adam, three reports folded into one version: (1) "The bridge refuses to
+launch the activities of an app" + "Android did not confirm... then text
+gets cutoff"; (2) "When I try to enable system packages, the modal has too
+much text in it and i cant scroll"; (3) "the one long page has way too much
+scrolling" + "The bridge page also has way too much text. I dont want there
+to be huge lengths of text. You can put a ? Button in each of the sections
+that has long text and have the details popup in a modal." Report (3)
+REVERSES the v1.37 single-view direction — the latest word wins, so the
+single-scroll layout is gone. No new permissions. **Bridge protocol v8:
+Adam must restart the bridge once after installing** (the verifier fix runs
+bridge-side; a v7 bridge classifies STALE with the restart row, same
+fail-closed pattern as v1.33/v1.35/v1.36). Verified: `./build-apk.sh`
+completes; `apksigner verify` passes (v2 + v3) with the same signing
+certificate (`f646377d…f372a1c52`); badging shows versionCode **43** /
+versionName **1.38**; 28 permissions (unchanged); zero
+AccessibilityService strings in the dex. APK: 20,878,718 bytes, SHA-256
+`c0584ad367f785501db16e98d2588c23ab6128f864ebd6c14beca7688e8afaa6`.
+
+### Root cause: the launch refusal
+
+`BridgeOps.verifyAmStart` failed whenever `am start` output lacked
+"Starting: Intent", producing "Android did not confirm the launch: \<up to
+300 chars of am output\>", and `AppActivitiesActivity` showed it as a
+Toast — truncated on screen and gone in seconds, so the reason was
+unreadable. Two of the failures were false: `am start` prints "Warning:
+Activity not started, intent has been delivered to currently running
+top-most instance." when the activity is already on top — the activity
+came forward, and the verifier called it a refusal.
+
+### The two launch changes
+
+1. FULL RESULT DIALOG — `AppActivitiesActivity.launchViaBridge` replaces
+   the result Toast with a scrollable `AlertDialog` showing the COMPLETE
+   result text, selectable, naming the component; the failure title states
+   the bridge refused. The body shaping is pure Java
+   (`ActivityList.refusalDialogBody`: component + blank line + full error;
+   null/blank error reads "No reason was given."). Success keeps the short
+   toast ("Launched \<label\>."). The pre-launch confirm and the audit
+   logging are unchanged. Both themes.
+2. WARNING-AS-SUCCESS — `verifyAmStart` treats output containing
+   "delivered to currently running top-most instance" (case-insensitive)
+   as SUCCESS, with a message saying the activity was already running and
+   was brought forward. All other verifier rules are unchanged (exit 0 +
+   "Starting: Intent" + no error/exception markers); validation,
+   package/class checks, and the fixed argv are untouched.
+
+### The modal fix + shorter copy
+
+The bug was `strongConfirm` in `DeepControlActivity`: it built a custom
+`LinearLayout` box set via `.setView(box)`, which `AlertDialog` does NOT
+scroll — while the plain `confirm()` path uses `.setMessage()`, which
+scrolls natively. The fix wraps the strong-confirm content in a
+`ScrollView` (the hold button scrolls with the text; a stationary press
+still holds, because the ScrollView only steals the touch once the finger
+moves). Every dialog on the confirm/strongConfirm path is covered by
+construction (`confirmRestore` delegates to `confirmAction`; the switch
+confirm shares `strongConfirm`). Input-form `setView` dialogs (flag edit,
+wm dialogs) are not on that path and were not redesigned. The protected
+enable/disable confirm copy is trimmed to the essentials — exact package,
+specific consequence, recovery command (`recoveryText` = "Recovery —
+re-enable here, or: adb shell pm enable \<pkg\>"); the confirm still
+requires the same strong hold. The switch-enable flow is untouched beyond
+the shared scrollability; `switchConfirmBody` was not trimmed.
+
+### Pages, not one long scroll (the reversal)
+
+`DeepControlActivity` is a hub plus one page per group. The hub lists the
+18 groups as short rows in the same order (Protected packages, Target app,
+Running processes, Permissions, AppOps, App state, Background policy,
+Private DNS, Launcher system setting, Apps, Display, Input, Capture, Power
+& scheduling, System config, Inspect, Change history, Result); tapping a
+row opens ONLY that group's page; back (button or system back) returns to
+the hub. Group cards are built once by the unchanged v1.37 `addGroup` code
+and staged; showing a page re-parents that group's card into the page
+holder, so every control keeps its state. The Result card travels with the
+page where a control ran (it is the last group built; the Result page
+shows it once). Bridge status and the Protected packages ON/OFF line stay
+visible on the hub. `scrollToResult` scrolls the current page only.
+Navigation restructure only: controls, confirmations, refuse-lists,
+audit, and journaling behave exactly as before. Both themes.
+
+TEXT RULE, ABSOLUTE (Adam's clarification): no paragraphs of body text on
+any page — one short header line per section plus the controls. Every
+longer explanation lives ONLY behind that section's "?" modal
+(`showInfo`, `.setMessage()`, which scrolls natively). Copy genuinely
+needed inline to use a control (a field hint, a status line, a button
+label) stays inline and short: the bridge-status lines, the protected
+status lines, the stale hint, and the flag status line were all shortened
+to one short line each; the flag tap/long-press/switch instructions moved
+into the System config "?" text. Confirmations are unchanged by this rule
+except for the shortening above.
+
+### System flags: namespace picker + toggles
+
+The show-everything flag list is replaced by a dropdown (Spinner)
+listing the namespaces alphabetically, populated by one unscoped list
+call (`ConfigFlags.sortedNamespaces` unions flag-line namespaces and
+bare namespace names, sorted, de-duplicated). Selecting a namespace shows
+ONLY that namespace's flags; the default is the first namespace, or the
+last-picked one when it is still listed — the choice persists in Prefs
+(`KEY_LAST_FLAG_NAMESPACE`, device-local, never in the profile). The
+picker caps at 200 namespaces with an honest note; the flag list caps at
+400 rows with an honest note. Each flag row gets a TOGGLE SWITCH only
+when its current value is exactly "true"/"false"
+(`ConfigFlags.isBooleanValue`); flipping it fresh-reads the flag and
+goes through the existing strong confirm + journaling + re-read
+verification (`setDeviceConfigWith`, same as Change value). A flag with
+any other value shows its value with the existing long-press menu
+(Change value / Reset to recorded default); the group "?" copy says
+plainly that switches appear only on true/false flags. The switch reverts
+visually on tap and commits only through the confirm; a flag that no
+longer holds true/false on the fresh read reloads the list instead of
+guessing. "Reset all flags to defaults" stays on the flags page. The
+manual Read/Set form keeps its own namespace input, synced from the
+picker and from tapping a flag row.
+
+### On-device checklist
+
+- Launch a non-exported activity that is NOT running → it launches.
+- Launch one that IS already on top → success ("already running, brought
+  forward"), not a refusal.
+- Launch one that genuinely fails → the dialog shows the full `am`
+  output, scrollable and selectable, naming the component.
+- Stale bridge → restart row on the hub + honest "bridge is old" copy on
+  the activities screen; restart once → v8.
+- Enable a protected package → the modal fits, scrolls if long, text
+  short (package + consequence + recovery command); disable path same;
+  other long confirms scroll.
+- Hub fits one screen of short rows; each group opens its own page; back
+  returns to the hub; bridge status + Protected ON/OFF visible on the hub.
+- No page carries a paragraph of inline text; every "?" opens a scrollable
+  modal with the details.
+- Flags picker shows one namespace; the last-picked namespace is restored
+  on the next visit; boolean flags toggle with confirm + journal entry;
+  non-boolean flags keep the long-press menu; the result is visible on
+  the page where the control ran.
+- No bridge restart is needed for the pages/flags/modal changes alone —
+  but the v8 bump means one restart is required for this version anyway.
+
+### Harness
+
+`BridgeOpsHarness` +7 (warning → success with and without the Starting
+line, case-insensitive; error/exception/nonzero-exit still fail);
+`AppActivitiesHarness` +6 (refusal body shaping);
+`BridgeGateHarness` incl. fixed isStaleRefusal legs (v7 stale-by-version,
+v8 current-version refusals not stale); `DeepControlHarness` +6 copy-trim
+legs plus `protocolBumped` replacing `protocolUnchanged`;
+`ChangeJournalHarness` +19 (boolean/toggle rules, picker namespace union:
+148 total).
+Full sweep via `~/workspace/run-launcher-harnesses.sh` — all suites green
+(see the build report for counts).
+
+## v1.37 (2026-11-16) — change journal + restore to default, config flags by category, process menus, single-view Deep controls
+
+Adam: "I need the launcher to keep track of any changes that are made so
+things can be restored to default. I want the list of config flags to be
+sorted by category and each item to have a menu when long pressed to
+change the flag. I need a way to set all flags to defaults. I also need a
+list of the processes with the long press menu to enable/disable them."
+Plus, same version: "the bridge screen has way too much text and I want
+it to be cleaner and more organized with all of the controls in a single
+view" — the Deep view controls screen, redesigned (presentation only).
+No new permissions. **Bridge protocol stays v7: no bridge restart is
+needed** — every before-value read reuses an existing op (see below).
+Verified: `./build-apk.sh` completes; `apksigner verify` passes (v2 +
+v3) with the same signing certificate (`f646377d…f372a1c52`); badging
+shows versionCode **42** / versionName **1.37**; 28 permissions
+(unchanged); zero AccessibilityService strings in the dex. APK:
+20,874,622 bytes, SHA-256
+`baa5cbecc1745d0745d09bbf9086658983fcb5854cd8ad0881afa38181db4cf6`.
+
+### The change journal (the feature)
+
+`ChangeJournal.java` (pure Java, no Android imports) persists one
+app-private file, `change-journal.json` under `getFilesDir()`. It
+survives cold starts and is NEVER part of the portable profile export
+(the export reads only Prefs keys; the journal file is referenced only
+by `ChangeJournal` and `DeepControlActivity` — grep-proven). Each entry
+records op, target, previous value (read first), new value, timestamp,
+restore routing (package / namespace / key / detail), and its state.
+
+- **Record before, finalize on success.** `runJournaled` persists the
+  entry PENDING before the write runs; success finalizes it
+  (`markApplied`), failure/refusal drops it entirely — nothing changed,
+  and the audit log already holds the attempt. A pending entry left by
+  a dead process is dropped on load: its outcome is unknowable.
+- **Restores never append entries.** Restoring writes the previous
+  value back through the same governed `BridgeControl` op (same
+  confirmations, refuse-lists, override rules, verification, audit
+  markers) and marks the entry restored, so restore-all cannot loop.
+  Undo paths (battery reset, Doze unforce, display reset-to-originals,
+  install-existing from the Removed list) are NOT journaled: they are
+  the return to a previous state, not a new change.
+- **Restore-all replays newest-first**, ending at the earliest recorded
+  values, under ONE strong confirm naming the attempt count and the
+  skipped (unrestorable) count. A refused entry does not stop the
+  replay; every result is reported honestly with failures listed.
+- **Cap 500 entries**: the oldest restored entries are dropped first,
+  then the oldest entries overall.
+- **"Defaults" are strictly the earliest recorded values.**
+  `recordedDefault` returns the earliest UNRESTORED applied entry's
+  previous value for a flag/setting — null when there is no unrestored
+  entry, when the earliest such previous value is unknown, or when the
+  earliest such entry is unrestorable. Skipping restored entries is
+  what makes a Restore button hide once its flag is back at its
+  default; a new change after a reset re-establishes the default from
+  its own fresh before-value.
+
+Coverage — every persistent Deep-view write is journaled:
+
+| Write | Before-value read | Restore |
+|---|---|---|
+| SET_APP_ENABLED | PackageManager enabled state (sync) | Set back |
+| SUSPEND / UNSUSPEND | None exists — unknown | Unrestorable; copy points at the manual inverse |
+| UNINSTALL_USER | "installed" (it was, or the call refuses) | INSTALL_EXISTING |
+| SETTING_PUT / SET_LAUNCHER_SETTING | SETTING_GET | Put the previous value back; "null" (unset) → unrestorable |
+| DEVICE_CONFIG_PUT | DEVICE_CONFIG_GET | Put the previous value back; "null" (unset) → unrestorable |
+| WM size / density / overscan | Fresh WM_GET (dialogs restructured to read first) | Set the previous value back; existing originals prefs + Reset untouched |
+| NIGHT_SET | Fresh NIGHT_GET | Set the previous mode back ("unknown" → unrestorable) |
+| BATTERY_SET_LEVEL / BATTERY_UNPLUG | Fresh BATTERY_GET display string | BATTERY_RESET unconditionally — restorable even with an unknown previous |
+| STANDBY_SET | Fresh STANDBY_GET | Set the previous bucket back ("unknown" → unrestorable) |
+| DOZE force-idle / force-inactive / step | Fresh DEVICEIDLE_STATE | Unforce unconditionally — restorable even with an unknown previous |
+| GRANT / REVOKE permission | PackageManager.checkPermission (sync) | The inverse grant/revoke |
+| SET_APP_OP | APPOPS + `BridgeOps.parseAppOpMode` | Set the previous mode back (unparseable → unrestorable) |
+| SET_PRIVATE_DNS | Settings.Global mode + specifier (sync; null mode = "opportunistic", the platform default) | Set the previous mode/host back |
+| SET_BACKGROUND_DATA / SET_DEVICE_IDLE_WHITELIST | No read op exists — unknown | Unrestorable; copy points at the opposite action |
+
+Recorded as **cannot be undone** (never a faked restore): clear-data,
+Wi-Fi forget, user removal, trim caches, user creation, APK install.
+NOT journaled (transient / non-state): force-stop/Kill, input
+injections, capture, inspect reads, run-job, activity launch,
+screenrecord/bugreport, stop-bridge. Radio writes from the Connections
+screen and SMS-originated writes are out of scope for the journal
+(audit-log-only) — the journal covers the Deep view, where restore
+actions live.
+
+**No protocol bump.** Every before-value read reuses an existing op
+(WM_GET, SETTING_GET, DEVICE_CONFIG_GET, NIGHT_GET, BATTERY_GET,
+DEVICEIDLE_STATE, STANDBY_GET, APPOPS) or a client-side read
+(PackageManager, Settings.Global). `ShellBridgeMain.VERSION` and
+`BridgeGate.HOLD_WATCH_VERSION` stay 7; the harness pins this
+(DeepControlHarness leg 17). No bridge file was touched: the bridge
+reads the "override" field in exactly one place still (grep-proven).
+
+### Config flags: sorted by category, long-press menu, reset all
+
+`ConfigFlags.java` (pure Java) parses `device_config list` output in
+both shapes — flag lines (`namespace/key=value`, or bare `key=value`
+when the call was scoped to one namespace) and bare-namespace output
+(the unscoped list on some builds returns namespace names only, in
+which case each namespace is fetched separately, capped at 200).
+Unparseable lines are skipped, never guessed; unparseable output is
+shown raw. The list renders grouped: namespaces alphabetical (the
+category headers), flags alphabetical within, each row showing the key
+and current value (empty reads "(empty)").
+
+- **Tap** a flag fills the manual form below and reads the value.
+- **Long-press** opens a menu: "Change value…" (edit dialog prefilled
+  from a FRESH get, validated non-empty single line ≤512 chars, then
+  the existing strong confirm + journaling) and "Reset to recorded
+  default" (only while `recordedDefault` holds one; strong confirm; on
+  success every entry for that flag is marked restored).
+- **"Reset all flags to defaults"** in System config replays the
+  flag-restore plan (device_config + settings entries, newest first)
+  under one strong confirm naming the count + skipped count, with
+  per-flag results reported honestly. The copy states plainly:
+  "defaults" = the values recorded before the app first changed each
+  flag; flags the app never changed are untouched; flags changed
+  outside the app can't be known.
+- The Display-section settings editor (8 governed keys) is journaled
+  too, and each key gets a **Restore** button visible only while a
+  recorded default exists (normal confirm, like other setting
+  changes; on success the flag's entries are marked restored).
+- A flag that was UNSET before Control changed it (`device_config get`
+  returns the literal `null`) is unrestorable: restore would need a
+  delete, and `cmd device_config delete` is not reachable through any
+  existing op — the empty-value put's "clears" behavior was NOT treated
+  as a verified delete. The journal says so instead of pretending.
+
+### Processes: long-press enable/disable on every mapped row
+
+`ProcessRules.menuItems(row, enabledState)` (pure Java, single source
+of truth for the menu) decides: Details always; no known package → ONE
+disabled item with the exact wording "No package found for this
+process — nothing to disable" (the v1.33 no-guessing rule stands);
+Control's own row → the disabled explainer only; every other mapped row
+→ Kill + Enable/Disable, reading FRESH enabled-state at menu-open time
+(null when the package vanished → the label defaults to Disable and
+the governed path refuses honestly). **Deliberate change from v1.36:**
+protected rows now OFFER Enable/Disable even with the override off —
+the governed confirm names the coming refusal and the bridge refuses,
+the same pattern Kill already uses; the v1.36 menu-hiding behavior is
+superseded. Enable/disable from the menu runs the exact shared
+`enableDisableFlow` path (same confirms, refuse-lists,
+ProtectedOverride rules, audit markers) plus journaling. Kill behavior
+is unchanged.
+
+### The single-view redesign (presentation only)
+
+The Deep view was a disclosure-section maze (17 collapsible sections,
+long explanatory paragraphs inline). It is now ONE scrolling view:
+every group is always visible as a `Ui.card()` card with one short
+header line; the longer explanation moved behind a small "?" button per
+group that opens an info dialog. Browsing copy is terse; NOTHING
+essential is hidden — every confirmation dialog still names the exact
+action, target, consequence, and recovery exactly as before.
+
+- **Group order kept as Adam knows it:** Protected packages, Target
+  app, Running processes, Permissions, AppOps, App state, Background
+  policy, Private DNS, Launcher system setting, Apps, Display, Input,
+  Capture, Power & scheduling, System config, Inspect, Change history
+  (new), Result. The About section compressed to a "?" button on the
+  title row. No control requires a separate screen; nothing was
+  dropped.
+- **Result card stays last, always visible.** `runCall` scrolls to it
+  (smooth scroll) for confirmed actions; input injections report
+  without scrolling (rapid-fire presses must not yank the view).
+  `confirm()` was factored into `confirmAction()` so journaled and
+  plain paths share the exact dialogs; `runCall` delegates to
+  `runCallWithResult` with a result callback the journal finalizes on.
+- **All group data loads once on first resume** (processes, removed
+  apps, display, power, system config) instead of on section-expand;
+  Refresh buttons reload. The processes list refreshes after every
+  control run (it is always visible now, and an enable/disable must
+  show at once).
+- **Caps that keep the view usable:** flags render capped at 400 rows
+  with an honest note + narrow-by-namespace hint; history renders
+  capped at 100 rows with a count note. Both themes use the same
+  `Ui.card()`/`Ui` tokens, so no theme-specific layout exists.
+
+### Deviations from the brief (all deliberate, with reasons)
+
+- Suspend/unsuspend, background-data, and Doze-whitelist entries are
+  unrestorable (no read op exists for the previous state) — the brief's
+  "previous value unknown → restore refuses honestly" fallback, with
+  copy pointing at the manual inverse action.
+- Unset-before flags/settings are unrestorable (no verified delete) —
+  the brief's explicit fallback.
+- Battery/doze restores are unconditional (reset/unforce) and stay
+  restorable even when the before-value read failed — the restore does
+  not depend on the recorded value.
+- The process menu's own-package row offers Details + explainer only
+  (no Kill) — `menuItems` is the single decision point, and offering a
+  command against Control itself serves nothing.
+- WM dialogs now read fresh state before opening (one extra bridge
+  round trip per dialog) — the journal needs a true before-value, and
+  the prefilled values are fresher for it.
+- `recordedDefault` skips restored entries (a fix to the journal core
+  made during this build): otherwise a setting's Restore button would
+  never hide after a successful restore.
+- Restore-to-default actions mark entries restored ONLY on bridge
+  success (via the result callback, not the `after` runnable, which
+  runs on failure too).
+
+### Harnesses
+
+New `ChangeJournalHarness` (129 checks: pending lifecycle, codec round
+trip incl. dead-process pending drop + corrupt/missing files, ordering,
+recorded defaults incl. the restored-skip rule, flag plan, 500-entry
+pruning, display words, both flag-parse shapes + grouping, AppOp mode
+parsing) + 36 new legs in `DeepControlHarness` (process-menu rules +
+protocol-unchanged pin), now 510 checks. Full sweep: all 28 suites
+green — AdbConnect 15, AppActivities 36, AppListCodec 22, AudioModem
+71, BridgeGate 55, BridgeOps 433, Bridging 157, Camera 461,
+ChangeJournal 129, DeepControl 510, History 78, HoldWatch 64, LowData
+129, Nat 190, NfcArm 40, Relay 28, RingMath 101, Setup 85, Share 145,
+Subscription 75, Terminal 29, TerminalScroll 32, Updater 143,
+WalkieLayout 30, WalkieMode 70, Wallet 56, Watchdog 58, WordDict 497.
+
+### On-device checklist (v1.37)
+
+- Deep view opens as ONE scroll: all groups visible, short headers,
+  "?" dialogs hold the long text, both themes; no control needs a
+  second screen; Result card last, scrolls into view on a confirmed
+  run, stays put on rapid key presses.
+- Change a setting (e.g. font scale): Change history gains an entry
+  with the right was → now; Restore writes it back; the entry marks
+  Restored; the setting's Restore button appears, then hides after
+  the restore.
+- Disable an app, then Restore from history: the app re-enables; a
+  refused write (e.g. protected package, override off) leaves NO
+  history entry.
+- Flags: List flags groups by namespace, alphabetical; long-press →
+  Change value + Reset to recorded default; Reset all flags to
+  defaults restores every journaled flag with an honest per-flag
+  report; an unset-before flag shows "cannot be undone" with the
+  delete explanation.
+- Processes: long-press every row type — unmapped shows the exact
+  explainer; Control's row shows its explainer; a disabled app shows
+  Enable; a protected row offers Disable and the confirm names the
+  refusal when the override is off.
+- Restore all changes: one strong confirm, newest-first replay,
+  failures listed, unrestorable entries skipped and counted.
+- Cold start: history survives; profile export/import carries no
+  journal entries. No bridge restart needed (still v7) — the
+  Protected switch stays unlocked after the update.
+
+## v1.36 (2026-11-16) — protected-package override: disabling system-critical packages
+
+Adam: "I want to be able to disable the system critical packages." The
+refuse-lists are NOT removed: they stay the default, and the override is a
+deliberate switch with guardrails. No new permissions. Bridge protocol v7:
+a v6 bridge classifies STALE everywhere with the one-tap stale restart —
+Adam must restart the bridge once after installing 1.36.
+
+### The guardrails (the feature)
+
+- **Switch, default OFF.** A "Protected packages" section in Deep controls
+  (after About), with a switch persisted in `Prefs`
+  (`KEY_PROTECTED_OVERRIDE`, device-local — never in the portable
+  profile) and the section header naming its state (ON/OFF) so the state
+  is plain even collapsed. The persisted value survives cold starts; it
+  is never silently reset. Turning the switch ON needs the strong
+  press-and-hold-3-seconds confirmation, in plain words: what can break
+  (status bar, Settings, calls, Play services), the recovery path
+  (re-enable from this screen, or `adb shell pm enable <pkg>`), and the
+  Control exception. Enabling is audit-logged (`PROTECTED_OVERRIDE`,
+  `override=on`); disabling needs no confirm (the safe direction) and is
+  audited too.
+- **Per-action strong confirmation.** With the switch on, disabling or
+  enabling a refuse-listed package takes the strong confirmation naming
+  the exact package, the specific consequence for that package (see
+  `ProtectedOverride.consequenceFor` — every list member has one), and
+  the recovery command. Each override action is audit-logged with the
+  `override=protected-disable` marker, and the bridge's own result text
+  carries "Protected-package override."
+- **Scope is disable/enable ONLY.** Force-stop, clear-data, uninstall,
+  suspend, and every other op keep the existing refusals unchanged,
+  override or not. The bridge reads the "override" field in exactly one
+  place (the SET_APP_ENABLED case) — grep-proven; no other op's
+  validation code was touched.
+- **One hard exception: Control itself.** `app.control.launcher` stays
+  refused ALWAYS — the UI never offers it (the process menu shows a
+  disabled item saying so; the target-app path routes straight to the
+  audited refusal with no confirmation), BridgeControl refuses it
+  app-side, and the bridge enforces it even if a client asks. Reason:
+  disabling Control removes the only tool that can re-enable it.
+- **Switch gating.** The switch unlocks only on a CURRENT bridge (the
+  last ping's gate state). On a stale bridge it is disabled with a note
+  naming the restart; on a missing bridge it says the bridge is not
+  running. The switch must not promise what a stale bridge refuses.
+
+### Protocol decision: bump to v7, fail closed
+
+The override is a bridge-enforcement behavior change, so it takes the
+standard version bump: `ShellBridgeMain.VERSION` 6 → 7 and
+`BridgeGate.HOLD_WATCH_VERSION` 6 → 7, with the usual stale detection +
+one-tap restart (DeepViewActivity and AdbStarter follow the gate
+constant, so they need no changes). The client sends the switch state as
+an ordinary boolean field, `override`, on SET_APP_ENABLED requests.
+
+Fail-closed, two layers:
+
+1. **An old bridge refuses.** A v6 bridge never reads the "override"
+   field, so its SET_APP_ENABLED path computes exactly
+   `decideEnable(pkg, override=false)` — and the harness pins that every
+   refuse-listed package refuses under that input (leg 15). The flag
+   cannot smuggle a protected disable past an old bridge, because the
+   old bridge never looks at it.
+2. **The gate forces the restart.** A v6 bridge classifies STALE, the
+   Deep view shows the restart row, and the override switch stays locked
+   until the ping reports v7.
+
+The enforcement decision lives in pure-Java `ProtectedOverride`, shared
+by the bridge (`checkedPackageForEnabled`) and the client
+(`BridgeControl.setAppEnabled`, the Deep view menus and confirms), so
+the list the UI warns about is the list the bridge enforces — the same
+single-source-of-truth shape as `ProcessRules` (which still owns the
+lists themselves). Refusal wordings for the non-override path are
+byte-identical to the long-standing bridge strings.
+
+### UI details
+
+- The processes list + filter keep their classification and warnings
+  unchanged: a protected row stays ⚠-marked and in the System group.
+  The long-press menu offers Disable/Enable on a protected row ONLY
+  while the override is on, with the label naming the risk ("Disable
+  app — protected"); with the override off it shows a disabled item
+  pointing at the Protected packages section. Kill is unchanged
+  (offered, bridge refuses, confirm names the refusal).
+- The strong-confirm dialog was factored into `strongConfirm(...)` so
+  the switch can use the press-and-hold dialog without a bridge call;
+  `confirm(...)` delegates to it for the strong tier — no behavior
+  change to existing confirmations.
+- `BridgeControl.setAppEnabled` sends `override=true` only when the
+  switch is on AND the package is protected AND it is not Control
+  itself (`ProtectedOverride.overrideApplies`); ordinary packages never
+  carry the flag.
+
+### Verification
+
+- DeepControlHarness 474/474 (was 202; +272: decision matrix over both
+  lists, consequence coverage, scope/audit/menu/switch-copy pins, and
+  the old-bridge fail-closed leg including the gate↔bridge version
+  agreement). BridgeGateHarness 55/55 (was 52; +3: v7 parse, future-v8,
+  v6 stale-by-version). All other 25 suites unchanged and green.
+- Grep-proven: zero `AccessibilityService` references; no bare `pm
+  disable` element in any command construction (disable-user only, via
+  `PmOutcome`); the "override" field is read in exactly one place
+  (`ShellBridgeMain` SET_APP_ENABLED case).
+- Unproven until Adam's phone: the switch in hand, a protected disable
+  + re-enable round trip, the v6 → restart → v7 flow, and the audit
+  entries on-device.
+
+## v1.35 (2026-11-16) — bridge expansion: all remaining ADB capabilities
+
+Adam: "Add all of those features to the bridge" — the full survey list
+from the ADB-capabilities answer. Every remaining thing the shell user
+can do over adb, as named bridge ops, in seven new Deep controls
+sections. No new permissions. Bridge protocol v6: a v5 bridge
+classifies STALE everywhere with the one-tap stale restart — Adam must
+restart the bridge once after installing 1.35.
+
+### Op inventory, by section
+
+Apps: UNINSTALL_USER (`pm uninstall --user 0`, refuse-listed refused,
+pm's Success required), INSTALL_EXISTING (`pm install-existing
+--user 0`), LIST_REMOVED (the `-u` list minus the plain list, sorted),
+INSTALL_APK (staged path only, see below), SUSPEND_APP / UNSUSPEND_APP
+(`pm suspend` / `pm unsuspend` — a refusal passes through verbatim,
+and an empty success says pm printed nothing), TRIM_CACHES (fixed
+1 GiB target).
+
+Display: WM_GET / WM_SET_SIZE / WM_SET_DENSITY / WM_SET_OVERSCAN
+(`wm size/density/overscan`, verified by re-reading; the first
+successful read records the effective values as the originals in
+prefs, never overwritten; Reset restores exactly those, no confirm),
+SETTING_GET / SETTING_PUT over the eight-key allowlist (system
+font_scale, global window/transition/animator scales, system
+screen_off_timeout, screen_brightness_mode, screen_brightness,
+accelerometer_rotation — presets only, range-validated, verified by
+re-read), NIGHT_GET / NIGHT_SET (`cmd uimode night yes/no/auto`).
+
+Input: INPUT_KEY over the fixed 15-code menu, INPUT_TAP /
+INPUT_SWIPE (coordinates validated against the live display bounds
+app-side and a sanity bound bridge-side), INPUT_TEXT (pure-Java
+escaping: `%` → `%%`, space → `%s`, controls dropped; the typed text
+is never logged, only its length).
+
+Capture: SCREENSHOT (`screencap -p`, PNG as base64 in the response
+"data" field — see below), SCREENRECORD_START / STATUS / STOP
+(10/30/60s, start-and-poll, file in Movies).
+
+Power & scheduling: DOZE (`dumpsys deviceidle force-idle /
+force-inactive / unforce / step`, state re-read), DEVICEIDLE_STATE,
+BATTERY_GET / BATTERY_SET_LEVEL / BATTERY_UNPLUG / BATTERY_RESET
+(level verified by re-read), STANDBY_GET / STANDBY_SET (`am
+get/set-standby-bucket`, verified by re-read), RUN_JOB (`cmd
+jobscheduler run -f`, job ids found via dumpsys jobscheduler in
+Inspect).
+
+System config: DEVICE_CONFIG_LIST / GET / PUT (put is strong
+confirmed naming namespace+key+old→new, verified by re-read; an
+empty value clears the flag and "null" is the confirmation),
+WIFI_LIST / WIFI_FORGET (`cmd wifi list-networks / forget-network`;
+the list parse is lenient and shows raw output when it cannot parse),
+USERS_LIST / CURRENT_USER / USER_CREATE / USER_REMOVE (user 0 and
+the current user are refused by the bridge with the reason),
+LAUNCH_ACTIVITY (`am start -n`, wired into the v1.22 activities
+screen: non-exported rows offer "Launch via bridge" when the bridge
+is current).
+
+Inspect: DUMPSYS over the fixed 11-service menu (activity, window,
+battery, wifi, notification, power, package, meminfo, usagestats,
+deviceidle, jobscheduler — 14s bridge timeout against the client's
+15s), LOGCAT_TAIL (streaming, mirrors HOLD_WATCH: `logcat -T 20`,
+bounded lines, optional substring filter, ends on disconnect/Stop/
+cap; the Deep view Device-log surface gains Live log + Stop),
+BUGREPORT_START / STATUS / STOP (start-and-poll, file in Download).
+
+### Governance
+
+Fixed command arrays only: every new command is built by the
+pure-Java `BridgeOps` (argv construction, output verification,
+allowlist enforcement, parsers) and the bridge runs it through
+`runFixed`/`runFixedResult`/`runFixedBytes` — grep-proven, no
+`Runtime.exec`, no shell strings, no new `pm disable` (the v1.33
+disable-user fix stands). `runFixedResult` is the v6 addition: the
+old `runFixed` discarded exit codes, and the v6 verifiers need both
+the tool's words AND its exit status. Every write verifies from the
+command's own output before success is reported (the v1.33 lesson),
+refusals carry the tool's own words, and every write is audit-logged
+through BridgeControl. Tiered confirmations throughout, with two
+deliberate exceptions, both documented on the screens: input
+injections need no per-press confirm (confirming every tap would make
+them unusable, and a confirm dialog would show typed text on screen —
+they are audit-logged instead), and resets (display originals,
+battery reset, Doze unforce) need no confirm because they restore the
+known-good state.
+
+### Screenshot / screenrecord / bugreport retrieval
+
+The bridge answers one JSON line per request, and the text field is
+capped at 350,000 chars — a PNG does not fit. SCREENSHOT therefore
+returns its base64 in a separate "data" field, outside the cap, and
+the summary stays in "text" so no generic display ever dumps
+megabytes. The bridge captures the PNG with stderr kept separate
+(merging it would corrupt the image) and checks the PNG signature
+before answering. The app saves the PNG to app-private storage (only
+the latest is kept) and View/Share go through ImageShareProvider, the
+same narrow one-file token pattern as ApkShareProvider. Recordings
+and bugreports are start-and-poll (they outlive the 15s client
+timeout): the bridge holds one slot each, STATUS reads liveness +
+file size, STOP sends SIGTERM first (screenrecord finalizes its file
+on a clean stop) and force-stops only if it does not exit. Files land
+in shared storage — Movies for recordings (the gallery is the
+retrieval; no media-read permission was added), Download for
+bugreports — and every status names the exact path and size.
+
+### APK install staging
+
+The app-private-storage idea does not work: the shell user cannot
+read the app's private files. So a picked APK is copied twice, both
+by the app: once to its own cache, where PackageManager reads the
+package it declares (a non-APK is refused here, before anything is
+staged), and once to the app's own MediaStore Downloads entry with a
+random token name — `/sdcard/Download/control-install-<token>.apk`,
+the one path shape the bridge installs from, validated exactly. The
+confirm names the file, package, and version; the staged and cache
+copies are deleted after the attempt or on cancel. Never a URL, never
+a download: the file picker is the only source.
+
+### Deliberately left out
+
+Add-network (joining a Wi-Fi network needs credential handling too
+fiddly to do honestly in this pass — joining stays in Settings);
+full `dumpsys` (far too large for the response channel and the
+screen — the fixed menu is the scope); free-form settings keys (the
+eight-key allowlist is the whole writable surface); a jobscheduler
+list op (`cmd jobscheduler` has no per-package filter — run-by-id
+plus the dumpsys menu is the honest scope). The `cmd wifi`
+list-networks wording and the `cmd uimode night` read-back wording
+are the least certain of the new parsers: both fail honestly (raw
+output shown / "unknown") when Android 16 words them differently,
+and the on-device pass decides.
+
+### Verification
+
+BridgeOpsHarness is new (433 checks: exact argv for every command,
+output-verification shapes, allowlist enforcement, wm validation +
+originals logic, input escaping, key menu, user-removal refusals,
+suspend honesty, staged-path rule, device_config shapes, wifi/user
+parses, launch + dumpsys menus, wm-state and long-task status
+round-trips). BridgeGateHarness grows 49 → 52 (v6 parse, v5 STALE,
+v5 refusal stale by version). All 27 suites green; every other count
+unchanged. Zero AccessibilityService references. The v1.34 builder's
+IPv6 relay was still running for the live Relay harness (28/28).
+
+## v1.34 (2026-11-16) — sort the running processes: system vs the processes you can control
+
+Adam: "On the running processes I only want to be able to sort the system
+processes from the processes I can control." One control, nothing else: a
+segmented All / Can control / System row at the top of the Running
+processes section (small-button language, accent fill on the selected
+segment, both themes). Default All — the v1.33 behavior on open. Tapping a
+segment filters the displayed rows immediately from the fetched list; no
+re-fetch, no persistence of the choice. Refresh re-fetches and re-applies
+the selected filter.
+
+The classification is `ProcessRules.groupFor` (pure Java, harness-tested),
+and it uses ONLY the signals v1.33 already computed — no new heuristics,
+no new bridge data. CONTROLLABLE means exactly the rows whose long-press
+menu offers Kill and Disable/Enable: a known package mapping AND not
+refuse-listed AND not system-marked. SYSTEM is everything else:
+system-marked rows (even with a mapping, e.g. SystemUI), refuse-listed
+rows (even with a mapping, e.g. Play services), and unmapped rows
+(Details only). The ⚠ markers, the Details-dialog protection reasons, and
+what each row can do are unchanged — the filter only changes which rows
+are shown.
+
+Counts and cap honesty: the status line always names the fetched total
+and both group sizes ("7 processes — 3 can be controlled · 4 system"),
+and under a filter it names the group, the other group, and the loaded
+total. The 300-row cap bounds the rows rendered; under a filter the
+status line says "showing the first N of this group", never implying the
+filter searched beyond the fetched set. An empty group shows an honest
+empty state ("No processes you can control in this load — Refresh to
+load a fresh list."), never a stale list.
+
+Verified: DeepControlHarness gains classification + filter legs (see the
+harness header); all 26 suites green. No new permissions, no bridge
+protocol change (still v5 — no bridge restart needed for this update),
+zero AccessibilityService references.
+
+## v1.33 (2026-11-16) — Deep controls redesign: compact sections, running-processes list, package-disable fix
+
+Adam: "way too much text" in Deep view — make it more user friendly, with
+running processes as a list and long-press commands on a process. And: "Why
+cant I disable packages using the shell user?" Both are answered here.
+
+### Deep controls is compact sections now
+
+`DeepControlActivity` keeps every control, explanation, and audit surface
+from v1.32 — nothing was removed — but each group sits behind a disclosure
+header (▸/▾) that opens with one tap: About these controls, Target app
+(expanded by default — it is the working context), Running processes,
+Permissions, AppOps, App state, Background policy, Private DNS, Launcher
+system setting, Result. The screen opens as a title, one bridge-status line,
+and nine headers instead of a wall of text. All explanation copy is verbatim
+from the old layout, inside its section. The Result section auto-expands when
+a control runs. Both themes (all text/colors through `Ui`, no hardcoded
+colors). The stale "governed allowlist v2" status copy (flagged since
+v1.15.1) is fixed: the status line now names the version the bridge actually
+reported, via `BridgeGate.versionName`.
+
+### Running processes: a list, with long-press commands
+
+A new "Running processes" section lists live processes from the bridge's
+existing PROCESSES op (fixed `ps -A` — no new bridge op for listing). Rows
+are name + one status line (PID · state · memory · system/protected
+markers); system or refuse-listed rows carry a ⚠. The list loads only when
+the section expands or Refresh is tapped — never a background poll — and a
+bridge failure shows the honest error, never an endless spinner. Display is
+capped at 300 rows in ps order, with the status line saying so when capped.
+
+Shaping is pure Java in `ProcessRules.java` (harness-exercised): ps lines
+that do not parse are skipped, never misread; the package mapping is the
+process name up to the first ':' and ONLY when it looks like a package name
+AND is installed — a custom process name like
+`com.google.android.gms.persistent` stays unmapped, never guessed. Tap a row
+for a Details dialog (PID, parent PID, user, state word, memory, package or
+an honest "no package mapping", protection reason). Long-press opens a
+`PopupMenu` (the Connections-screen pattern): Details always; Kill and
+Disable/Enable only when a mapping is known — without one, the menu shows a
+disabled item saying why instead of offering commands that cannot run.
+
+**Kill is the existing governed kill path.** There is no per-PID kill op in
+the bridge, and none was added: the shell user cannot `kill()` another UID's
+process (no CAP_KILL), so a KILL_PID op would fail for nearly every row.
+Kill runs the existing `FORCE_STOP` path via `BridgeControl.forceStop`, and
+the confirmation dialog says exactly that — it names the process and PID,
+explains that every process of the app ends because Android gives the shell
+user no per-process kill, and carries the warning for system or
+refuse-listed targets. The brief's "Force-stop app" item IS that same path,
+so the menu's third command is Disable/Enable through the fixed
+SET_APP_ENABLED op below (shared `toggleEnabledFor`, same strong
+confirmation for system/destructive targets). All three commands go through
+the existing confirmations and the existing audit path; a refused target is
+refused by the bridge with its reason, and the attempt is audited. After any
+control runs, the list refreshes itself when the section is open.
+
+**Refuse-lists, one source of truth.** `ProcessRules` now owns
+`REFUSE_ALL` / `REFUSE_DESTRUCTIVE` (contents verbatim from the bridge);
+`ShellBridgeMain` reads them from there, so the list the UI warns about is
+exactly the list the bridge enforces. `BridgeControl`'s own minimal sets
+are untouched (its client-side pre-check result was already ignored — the
+bridge is the authoritative refuser).
+
+### Package-disable fix: disable-user + verified pm output
+
+Root cause, verified from code: `SET_APP_ENABLED` ran plain
+`/system/bin/pm disable <pkg>` — the SYSTEM-level disable, reserved for
+system/signature holders behind CHANGE_COMPONENT_ENABLED_STATE. The shell
+user is denied, so every disable failed. Second bug: the op reported
+success unconditionally without checking pm's output, so the refusal
+looked like success (unlike CLEAR_APP_DATA, which checks for "Success").
+
+The fix (`PmOutcome.java`, pure Java, harness-exercised):
+
+- Disable runs `pm disable-user --user 0 <pkg>` — the per-user variant the
+  shell user IS allowed. Same visible effect: the app cannot run and is
+  hidden. Enable keeps plain `pm enable`, which clears the user-disabled
+  state (its "new state: enabled" line confirms it).
+- pm's output is verified before success is reported: success requires NO
+  error marker (error/exception/unknown package/not installed) AND the
+  expected "new state:" line ("disabled" covers both `disabled` and
+  `disabled-user`). Empty, null, garbage, wrong-action, or error-bundled
+  output is a failure carrying pm's own words. A refusal can never again
+  read as success. Grep-verified: no bare `"disable"` element remains in
+  any pm command construction (the remaining `"disable"` strings are the
+  `svc` radio toggles and display text).
+
+### Bridge protocol v5 + the restart requirement
+
+The fix lives in `ShellBridgeMain`, which runs as a separate app_process
+that SURVIVES APK upgrades — so after installing 1.33 the running bridge
+is still v4 code until it is restarted (the v1.15.1 lesson). Handled the
+established way: `ShellBridgeMain.VERSION` 4 → 5 and
+`BridgeGate.HOLD_WATCH_VERSION` 4 → 5, so a v4 bridge classifies STALE
+everywhere (overlay gate, watchdog, Settings, Deep view) and the Deep
+controls status line names it ("running old code (v4)") with a one-tap
+"Restart bridge" button calling the existing
+`AdbStarter.restartStaleBridge` (stop-then-start; the plain restart would
+no-op on a running bridge). **Adam must restart the bridge once after
+installing 1.33 for disable to work** — the status line says so until he
+does. No new permissions; no AccessibilityService; no device-owner code
+(the launcher's device admin stays limited to force-lock + wipe-data).
+
+### Verification
+
+- New `DeepControlHarness`: **150/150** (ps parsing, package candidates,
+  mapping, refuse matching, warning flags, status/detail lines, pm
+  command construction, pm output verification incl. every failure
+  shape, end-to-end fixture).
+- `BridgeGateHarness`: **49/49** (was 44; +5 for v5: v4 now STALE, v5
+  CURRENT, v4 refusal stale, v5 fragments).
+- All 24 other suites green at their v1.32 counts: WordDict 497,
+  LowData 129, Bridging 157, Camera 461, Updater 143, Share 145,
+  AudioModem 71, NfcArm 40, WalkieMode 70, WalkieLayout 30, Relay 28
+  live, AdbConnect 15, AppActivities 36, AppListCodec 22, History 78,
+  HoldWatch 64, Nat 190, RingMath 101, Setup 85, Subscription 75,
+  Terminal 29, TerminalScroll 32, Wallet 56, Watchdog 58.
+- APK: 20,788,606 bytes, SHA-256
+  `ffa6fd96e80434ce292c0e8adecc72eba041d21fd19c88c9b79f8156ea381c6c`,
+  versionCode 38 / 1.33, same signing cert, 28 permissions unchanged,
+  0 AccessibilityService references in the dex.
+- On-device proof still needed: compact sections with everything
+  reachable; processes list populates; long-press Details/Kill/
+  Disable-Enable with confirmations + audit; system process refused
+  with reason; disable works after the bridge restart (app hidden +
+  can't run); re-enable works; a refusal reports honestly; stale
+  detection fires on the old bridge and the one-tap restart fixes it.
+  Also unproven: the toybox ps dialect and pm's exact wording on
+  Android 16 — both fail honestly (skipped lines / unconfirmed
+  outcome) if they differ.
+
+## v1.32 (2026-11-16) — every message encoded, no marker, long-press encoded view
+
+Adam's direction (2026-11-16, on 1.30): short messages looked
+unencoded; he wants ALL messages encoded, and with no
+per-message header saying so — "it just automatically knows
+it has to decode it" — plus a long press on a message to view
+the encoded form.
+
+ENCODE ALL: the v1.28 savings gate is REMOVED.
+WordDict.encode()/encodeScoped() always emit the coded wire
+form, on every road (mesh/LAN, Bluetooth, relay walkie, chat
+DMs). The "wire never grows" guarantee is GONE by Adam's
+choice: a one-word message costs its code, and an
+escape-heavy message may grow slightly. The v1.28
+never-wrong-decode rule stands: a payload that does not parse
+entirely as valid coded form renders raw with the honest
+undecoded note, never a silent mis-decode.
+
+NO MARKER — the wire is self-identifying by SHAPE, at zero
+extra bytes:
+- Mesh/Bluetooth: coded texts ride a NEW packet type 'D'
+  (the type byte already existed). The coded payload sits
+  on the "w" key inside the packet JSON; "wdt" rides as
+  before. The host relays 'D' packets verbatim, like 'T'.
+- Relay walkie + chat: the coded payload rides a new "w"
+  key instead of "text" in the envelope
+  (LowDataEnvelope / ChatEnvelope, the latter extracted
+  from ChatThreadView into pure Java so the harness
+  proves it). "ld" and "wdt" ride exactly as before.
+Strict decoding (WordDict.decodeCoded) gates the new shape:
+a coded payload must parse ENTIRELY as codes, escapes, and
+literals — a stray letter, emoji, or control byte outside an
+escape refuses with the corrupt note. The lenient decoder
+stays for legacy "wd"-marked payloads, byte-for-byte the
+v1.28 behavior. If encoding itself throws, the sender falls
+back to WordDict.escapeOnly (the whole text as escape runs)
+so the message still arrives readable in valid coded form
+instead of vanishing.
+
+LEGACY COMPAT (receiving — this build reads everything):
+- "wd":1/"wd":2 messages decode forever: in-flight, stored,
+  and from old-build senders (decodeMarked, unchanged).
+- Legacy PLAIN messages (no marker, old "text" key / 'T'
+  packets) display as plain text. The receiver
+  distinguishes by shape/key, never by guessing content.
+- Teach blocks ("wdt") unchanged in behavior: bounded,
+  applied before decoding, riding the new coded shape.
+  Learned-word submission (v1.30 DictSubmit) unchanged.
+  Capitalization/escape rules unchanged. The audio modem
+  is untouched. Bridging re-sends on the new shape and
+  never bridges a message it cannot decode (existing rule).
+
+BREAKING CHANGE (sending — both sides need 1.32+): an old
+build receiving the new form cannot decode it. Exactly:
+- Mesh/Bluetooth: an old build's packet switch has no 'D'
+  case — the packet is DROPPED silently (default branch).
+  The old build never sees the message at all.
+- Relay walkie: an old build's envelope parse finds no
+  "text" key and returns null, so the payload falls
+  through to the burst path and lands as a VOICE entry
+  whose blob is the envelope bytes (playing it is noise).
+  The old build never sees the text.
+- Chat: an old build's unwrap finds no "text" key and
+  shows an EMPTY message (optString default "").
+No copy promises old builds read new messages. This is the
+same breaking-change shape Adam already accepted for the
+v1.26 audio modem change.
+
+WIRE-FORM PERSISTENCE + LONG-PRESS VIEW: the actual wire
+form is recorded with each entry at send/ingest time, never
+re-encoded (a re-encode could differ as the dictionary
+changes):
+- Walkie entries carry "wire" (the payload exactly as
+  sent/received), "plainBytes" (the original text's UTF-8
+  byte count, -1 when unknown because the payload did not
+  decode), and "coded" (whether it arrived coded) —
+  stamped by WalkieStore.stampWire from every road: the
+  mesh/BT listeners (SentText carries the sent form),
+  sendTextViaRelay (LowDataEnvelope.buildDetailed), the
+  outbox flush (markQueuedSent), and RelayIngest.stampEntry
+  for both relay receive paths.
+- Chat messages carry the same three fields on Msg
+  (ChatEnvelope.Built/Unwrapped).
+- Pre-v1.32 entries lack the keys and read as unrecorded,
+  never a crash. HistoryRule moves the whole entry, so a
+  played message keeps its wire form in History. A
+  bridged entry stores the form AS THIS PHONE RECEIVED IT,
+  with its "relayed by <name>" provenance kept visible.
+Long-press a message in the walkie thread (or History) or a
+chat thread opens a menu with "View encoded message" (the
+walkie menu also keeps "Details"). The dialog
+(EncodedMessageDialog, shared) shows the DISPLAY form of
+the wire text (symbol + real Unicode super/sub digits via
+WordDict.wireDisplayForm — null for invalid input, in which
+case the raw wire shows), "Sent as N bytes, was M bytes"
+(the size line omitted when the original size is unknown),
+"Sent plain" + the text for legacy plain messages, the
+honest "The coded form was not recorded for this message."
+for pre-v1.32 entries, and the wire as received + the note
+for undecoded messages.
+
+Harnesses: WordDict 497 (was 385 — legs 3/5/9/10/14
+rewritten for encode-all and the new shape, leg 20 added),
+LowData 129 (was 124 — envelope leg rewritten, old-client
+leg now asserts the documented silent miss), Bridging 157
+(was 156 — envelope leg decodes the "w" key; "relay me"
+normalizes to "Relay me"), Subscription 75 (unchanged
+count — two expectations updated for normalization). All
+other suites unchanged and green; see the sweep in the
+v1.32 report.
+
+## v1.31 (2026-11-16) — camera monitoring page: network cameras, auto-detect, mesh proxy
+
+Adam's direction (2026-11-16): a Cameras page for network
+cameras, the easy version with auto-detect. A fifth pager
+page (after Chat), a tenth circle-menu destination, and a
+Cameras sub-ring listing the saved cameras. The page shows
+a two-column grid of tiles — latest snapshot, name, status,
+last-refresh time — tap for the full-screen view (large
+snapshot, name, address, Refresh, Edit, Remove). Refresh:
+per-camera button, refresh-all, and auto-refresh while the
+page is visible at each camera's own interval (5s/10s/30s/
+60s/off, persisted, default 10s). A camera that stops
+answering keeps its last picture, grayed, with "Unreachable
+since <time>" and a retry — never a spinner, never a blank
+tile hiding the failure. A 401 says "Check the username and
+password" and stops auto-refresh for that camera until the
+user retries — never a retry loop hammering a wrong
+password. Copy is honest throughout: snapshots, not video,
+except where MJPEG is advertised.
+
+AUTO-DETECT (three layers, ONLY while the user taps Scan —
+never background scanning; a visible "Scanning…" state with
+a Stop; results dedupe by IP, nothing added without the
+user choosing it):
+1. mDNS via NsdManager: _http._tcp, _rtsp._tcp, _onvif._tcp,
+   _axis-video._tcp, _camera._tcp. Plain _http._tcp alone
+   never lists a device — it must be a camera-marking
+   service type or a camera-named instance.
+2. ONVIF WS-Discovery: UDP multicast probe to
+   239.255.255.250:3702, ProbeMatches parsed for XAddrs +
+   scopes (name/model). Needs a MulticastLock, which is
+   why this version adds CHANGE_WIFI_MULTICAST_STATE
+   (normal-level, 28 permissions total).
+3. Bounded subnet sweep fallback: the CURRENT Wi-Fi /24
+   only, ports 80/8080/8000/554/443, short timeouts,
+   Server-header + body fingerprinting, ~15s max. Only
+   camera-like hosts are reported — generic Apache/nginx/
+   lighttpd answers do not qualify, and GoAhead/Boa need
+   a camera-ish body hint.
+
+FEED RESOLUTION, in order: (a) ONVIF GetSnapshotUri via
+SOAP when auth allows; (b) known-pattern probes AFTER
+credentials are entered (generic + vendor patterns for
+Hikvision, Dahua/Amcrest, Reolink, Axis, Foscam, UniFi —
+first 200 with image/* wins, probing stops at the first
+401); (c) a hand-typed URL. MJPEG where offered (ONVIF
+stream URI or known MJPEG patterns): the tile streams
+live (up to 4 concurrent grid streams) with a "Live"
+badge, and the detail view streams too; otherwise
+snapshots. The MJPEG parser is pure Java (multipart/
+x-mixed-replace, boundary-split-safe at any feed point,
+2MB frame cap with resync, SOI-only emission).
+
+HTTP: the fetcher is a minimal HTTP/1.1 GET over a raw
+socket (CamHttp) — deliberate, because the manifest sets
+usesCleartextTraffic="false" and the platform stack
+refuses LAN plain-HTTP. GET only, http:// only (https is
+refused: self-signed certificates), no redirects, capped
+bodies, one unauthenticated attempt + ONE auth retry.
+Credentials NEVER travel in URLs (userinfo is rejected
+everywhere, including in ONVIF URIs and stored paths).
+Digest auth is implemented properly (CamDigest, RFC 2617
+MD5/MD5-sess, qop auth > auth-int > none, per-camera nc
+tracking); SHA-only challenges are refused honestly, and
+Basic is the fallback when Digest is not offered.
+
+CREDENTIALS: typed once per camera, sealed with the
+wallet's Keystore AES-256-GCM seam (WalletCrypto) under a
+separate alias, control-cameras — no second crypto
+scheme. Stored in cameras.json as ciphertext only; never
+in the profile export, never logged, never in the clear
+in any file. No default passwords are ever tried. Last-good
+images live in cam-last/<id>.jpg, device-local, deleted
+with the camera.
+
+HOTSPOT TOPOLOGY: cameras with no Wi-Fi join the phone's
+REGULAR hotspot (fixed SSID/password, flipped by the user
+in Settings — the app cannot turn the regular hotspot on
+programmatically and never claims it can; the v1.25
+local-only share hotspot is the wrong tool here: rotating
+credentials, dies with the app). Cameras + phones on the
+hotspot LAN need no extra code: the mesh's LAN road
+connects phones, the page reaches cameras by IP. PROXY:
+the hotspot phone app-level-proxies snapshots to mesh
+peers NOT on the hotspot — a mesh/LAN request is fetched
+by the proxy phone from its hotspot LAN and served back
+over an HTTP server on port 8993 (the v1.25 pattern) with
+UDP announcements on 8994 (ids + names only). Kernel IP
+forwarding needs root and is NOT available — the proxy is
+application-level, JPEG bytes only, credentials never
+leave the proxy phone. The "Share cameras with the mesh"
+switch (Prefs KEY_CAM_SHARE) governs it, DEFAULT OFF;
+when off, nothing is served. Proxied cameras appear in
+the grid marked "via <phone name>", session-only, expiring
+after 15s without an announcement. MJPEG is direct-only;
+the proxy serves snapshots.
+
+HONEST LIMITS (in copy and here): current Wi-Fi/hotspot
+LAN only; cloud-only cameras (Ring/Nest/Wyze cloud)
+cannot be pulled directly — the empty state says so; no
+video through the relay; NO RTSP live video (snapshots +
+MJPEG only); no recording, no motion alerts, no PTZ.
+
+FILES: CamDigest, CamHttp, MjpegParser, CamOnvif,
+CamDiscovery, CamFeed, CamProxy, CamRecord, CamStore,
+CamScanner, CamFetcher, CamProxyServer, CamProxyClient,
+CameraPage (all new); MainActivity (PAGE_CAMERAS=4,
+cameraPage, ring sub-ring, EXTRA_CAMERA_ID),
+CircleMenuView (ITEM_CAMERAS=9), PageGlyphs (CAMERA=15),
+RingItems (Action.OPEN_CAMERA), OverlayRingSource
+(cameras sub-ring + routing), Prefs (KEY_CAM_SHARE),
+AndroidManifest (CHANGE_WIFI_MULTICAST_STATE),
+build-apk.sh (36/1.31), run-launcher-harnesses.sh
+(Camera suite). CameraHarness: 461 checks, all 25 suites
+green. No socket test in the harness: the sandbox garbles
+JVM IPv4 loopback, so the HTTP/MJPEG/ONVIF paths are
+proven over byte arrays and in-process handlers (the
+Share harness rule); the socket byte flow is verified by
+the on-device checklist below.
+
+ON-DEVICE CHECKLIST: scan finds a real camera on the LAN;
+add with credentials; the snapshot grid refreshes; the
+MJPEG live badge appears where offered; an unreachable
+camera shows its last image + honest status; manual add;
+hotspot topology — cameras on the regular hotspot are
+visible; proxy switch off = nothing served, on = a second
+phone sees "via" cameras.
+
+## v1.30 (2026-11-16) — dictionary write-back: learned words flow back to the GitHub dictionary
+
+Adam's direction (2026-11-16): when the phone learns a new word
+it should flow back into the shared dictionary, merged
+automatically when it is clean. The phone STILL never writes to
+the repo — there is no GitHub token in the app, ever. The
+write-back is a three-hop path: the phone proposes learned words
+to the Control Relay queue (the same signed-request auth as
+chat/walkie), and an off-phone merge job validates, appends, and
+pushes. Merges are batched hourly; no copy anywhere promises an
+instant merge.
+
+THE RELAY ENDPOINTS (deployed with this version; full contract
+in the relay's PROTOCOL.md §7.5/§7.6):
+
+- `POST /v1/dict/proposals` — the existing Ed25519 signed-request
+  prelude (pubkey + timestamp + signature, 5-minute replay
+  window, 600 req/min/key, registered devices only). Body
+  `{"words":[...]}`: 1–100 words, deduped server-side. Each word
+  must be 2–30 chars, lowercase a–z, with at most one apostrophe
+  strictly inside — one bad word refuses the WHOLE batch (400
+  `invalid_word`, naming the first offender). Rate limit: 100
+  words per key per rolling 24 hours (429 `rate_limited`);
+  refused batches consume nothing. Storage: `dict_proposals`
+  (word PK, first_seen, seen_count, source_count, merged_at)
+  plus `dict_proposal_sources` (word + SHA-256 of the pubkey) —
+  the queue holds words + counts only, never a pubkey.
+  Re-proposals bump seen_count, and source_count when a new key
+  proposes the word; a merged word's `merged_at` is never
+  resurrected.
+- `GET /v1/dict/queue` — CRON_SECRET Bearer guard (the purge
+  pattern). Returns unmerged words + counts, oldest first, cap
+  10,000.
+- `POST /v1/dict/queue/ack` — same guard. Body `{"words":[...]}`
+  marks them `merged_at = NOW`, idempotently.
+
+THE APP (this version): `DictSubmit.java` holds the pure submit
+rules — the submittable shape (mirrors the server), batching in
+first-learned order, the hourly throttle, the 100-word cap, and
+the exact JSON body. `DictStore.maybeSubmitLearnedWords()` runs
+the plan on the dictionary worker: at most one submit per hour,
+only when unsubmitted words exist, only when the relay answers —
+a `GET /v1/channels` reachability probe first, so an offline or
+relay-less network costs nothing. The submit itself goes through
+`RelayCore.proposeWords()` — the SAME signed-request path as
+chat/walkie, no second auth system — on the worker thread, never
+blocking a send or any UI. Failures are silent and retry at the
+next window; a 429 marks the words submitted anyway (the server
+already counted them toward the budget; re-sending would never
+help). Submitted words persist in the private file
+`dict-submitted.txt` (one word per line, capped at 50,000,
+oldest dropped first; the count mirrors into Prefs as
+`dict_submitted_count` for the row) and are never re-sent from
+this phone. The trigger runs after every dictionary build
+and every learn — including teach adoptions, so a word learned
+from another phone is proposed too (that is what `source_count`
+is for). The Dictionary row gained one line, "Shared N words",
+shown only when N > 0. No new permissions.
+
+THE MERGE SCRIPT (`~/workspace/dict-merge/merge-dict.py`, mode
+700): GETs the queue with the CRON_SECRET Bearer, re-validates
+every word, fetches the current `dictionary.txt` + `version.json`
+from the raw GitHub URL, drops words already present
+(case-insensitive), appends the new words in FIRST_SEEN order
+(the file stays append-only — never sorted, never edited),
+bumps `version.json` (version+1, new count, new sha256), commits
+and pushes via the secure PAT route from the ControlDictionary
+clone (`git fetch` + `reset --hard origin/main` first, trees
+verified), then ACKs the merged words. `--dry-run` does
+everything except the push + ack. Any failure exits non-zero
+with one log line, no partial push, no ack without a verified
+push, never force-push. The merge runs on a schedule the parent
+agent owns — no cron is created by this build.
+
+GRADUATION (re-verified, harness-simulated): a word that was in
+the learned section and then arrives in a fresh `dictionary.txt`
+is restored through the same `restoreLearned` alias path v1.29
+built — sends prefer the base code, the old learned code still
+decodes (the alias rule), unmerged learned words keep their
+codes, and taught sets survive the table swap untouched. The
+WordDictHarness MERGE leg runs the whole swap through real
+`DictFile` bytes: build before → learn → encode with the learned
+code → build after (word appended) → restore → encode with the
+base code → decode the old wire.
+
+Harness: WordDictHarness grew two legs — SUBMIT (42 checks) and
+MERGE (27 checks) — 385 checks total; all 24 prior suites green.
+
+Files changed in this version: new `DictSubmit.java`;
+`DictStore.java` (submit hook + shared-count), `RelayCore.java`
+(`proposeWords`), `Prefs.java` (submitted-words + last-submit
+keys), `WordTable.java` (`learnedWordsByIndex`),
+`SettingsActivity.java` (row line). Relay: `lib/db.ts`
+(dict_proposals schema), `lib/ratelimit.ts` (word budget),
+`lib/store.ts` (proposal store), `lib/route-helpers.ts`
+(cron guard), three new route files, `PROTOCOL.md`,
+`scripts/dict-verify.mjs` (48 checks, all passing locally +
+live auth checks).
+
+## v1.29 (2026-11-16) — the dictionary lives on GitHub: 370,164 words, learned words, in-band teaching
+
+Adam's direction (2026-11-16): a complete dictionary with all
+words, hosted on GitHub, fetched by the app in the background —
+with the app adding words it sees to its own on-device
+dictionary file. The phone NEVER writes to the repo (no token
+in the app, ever — a baked-in write key could be extracted by
+anyone holding the app); merges happen off-phone only. There is
+NO upload path for learned words in this version, and no UI
+promises one — the write-back path is a separate later build.
+
+THE REPO: https://github.com/doeyeknow/ControlDictionary
+(public, created 2026-11-16). Contents: `dictionary.txt` (one
+word per line), `version.json`
+(`{"version":1,"count":370164,"sha256":"5cdf9205…47dd895","format":1}`),
+and a README stating the APPEND-ONLY rule (entries are never
+reordered, removed, or edited — codes are positional, so any
+reorder breaks every coded message), the format, and the
+no-phone-write rule. Pushed commit b17048f8; the raw file was
+fetched back and verified byte-identical (count + sha256).
+
+THE WORD LIST: 370,164 words, no arbitrary truncation. The head
+is the v1 1,200-word list FROZEN in its exact v1.28 order
+(extracted programmatically from the shipped WordDict code, so
+every v1 code is unchanged). The tail is 368,964 words from
+`words_alpha.txt` in dwyl/english-words (MIT license), deduped
+and stripped of any word already in the head (case-insensitive).
+The file is lowercase except the frozen head's I-forms. The
+harness fixture `harness/dictionary.txt` is a copy of the
+shipped file, pinned by count + sha256.
+
+CODE MATH (extends v1.28): indices below 1240 keep the exact
+v1.28 two-byte codes (symbol + base-20 digit). At and above
+1240, codes are FOUR bytes and self-delimiting: symbol +
+lead + two base-62 digits, where the lead alphabet is 42 chars
+(`klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`) chosen DISJOINT
+from the 20 digit chars, so the second byte decides the form
+unambiguously. Span: 62 x 42 x 62 x 62 = 10,009,776 long codes;
+MAX_INDEX = 10,011,015. Learned indices start at 5,000,000.
+Every code byte is printable ASCII (the old-build degradation
+rule is unchanged). The display form for long codes is the
+wire form itself.
+
+FILE FORMAT + SECTIONS: the fetched text builds
+deterministically into a packed blob (`CDIC` magic, format 1,
+count, (count+1) big-endian offsets, concatenated UTF-8
+words) in app-private storage (`dict-base.blob`, atomic
+temp+rename — a half-written file is never used). The base and
+learned sections are INDEPENDENTLY versioned: learned words
+live in `dict-learned.txt` and taught sets in `dict-taught.txt`,
+so a list rebuild never loses them. Both stay on-device: never
+uploaded, never in a profile export.
+
+FETCH / VERIFY / REBUILD (DictStore, mirroring UpdateManager):
+on launch, throttled to ~1/hour, failures silent: fetch
+version.json over HTTPS only (manual redirects, each hop
+re-checked, 64KB cap, cache-busted); when the version or sha
+differs, download dictionary.txt (16MB cap) and verify its
+SHA-256 against version.json BEFORE use — a mismatch discards
+the download and keeps the old file. The blob is built,
+count-checked against the manifest, written atomically, and
+the active table swaps carrying the learned snapshot. While
+fetching or building — or on a corrupt/missing file — the
+codec falls back to the v1 1,200-word list that stays in code,
+so sending always works immediately and is never wrong.
+Corruption triggers a background rebuild. Settings shows a
+Dictionary row: version + word count + last-check status
+(building / ready / built-in list / check failed); tapping
+checks now.
+
+LEARNED WORDS: words seen in sent text and cleanly decoded
+received text (never undecoded payloads, whose code fragments
+would poison the table) that are not in the list are appended
+with the next free codes, stable forever, surviving restarts
+and rebuilds. Learnable shape: 2..64 chars, all-lowercase or
+Capitalized; ALL-CAPS runs and single letters are skipped.
+Cap: 50,000 entries, then learning stops (honest at-cap
+behavior: new words simply travel raw). Learned codes go on
+the wire ONLY after the peer/channel was taught them (see
+below).
+
+IN-BAND TEACHING: a learned code rides to a scope only after
+that scope was taught it. The first message spells the word
+out AND carries a teach block (`"wdt"`: `word:CODE` entries,
+max 50 per message, 4KB cap) — the block rides even on plain
+(unencoded) messages, so teaching completes on first use
+instead of waiting for a message long enough to absorb it.
+The receiver applies the block BEFORE decoding, so codes
+taught by a message resolve in that same message. Taught sets
+are per-peer (DMs) and per-channel (walkie/mesh), persisted,
+capped at 500 scopes. CONFLICT RULE: the sender's code is
+authoritative — the receiver ADOPTS the taught code for
+future sends while still DECODING its old local code for
+in-flight messages (kept as an alias; a displaced word loses
+its code and re-learns later). GRADUATION RULE: when a word
+exists in both the base and learned sections, the encoder
+prefers the BASE code and the decoder accepts EITHER code
+(the old learned code survives a merge as an alias). KNOWN
+LIMIT: a late channel joiner sees the honest undecoded note
+for learned words until re-taught; there is no re-teach
+protocol in this version; base words always decode.
+
+FRAMING: `"wd":2` for messages using the full/learned
+dictionary; `"wd":1` still decodes, and v1-only messages stay
+`"wd":1` when cheap (the version describes the wire, not the
+teach block, so v1.28 builds still decode head-only wires —
+they ignore the `"wdt"` key). Newer-version, corrupt, and
+untaught payloads render undecoded with honest notes
+(NOTE_NEWER / NOTE_CORRUPT / NOTE_UNTAUGHT), never spoken,
+never bridged. Savings, capitalization, and escape rules are
+unchanged. The audio modem is untouched.
+
+FILES: new DictFile.java, WordTable.java, TeachBlock.java,
+TaughtStore.java, DictStore.java; WordDict.java refactored
+onto WordTable (WORDS array untouched byte-for-byte, VERSION
+2); Prefs.java gains the dict keys; MeshNet/BtWalkie putText
+gain scope overloads + noteReceived on receipt;
+LowDataEnvelope gains a scope build + adopted on parse;
+BridgeRule.buildRelayedText gains a scope overload;
+RelayIngest.Decoded gains adopted; ChatThreadView, WalkiePage
+(relay send/bridge/poll), and SubscriptionService (ingest +
+onCreate init) wire the scopes; MainActivity calls
+DictStore.onAppLaunch; SettingsActivity gains the Dictionary
+group; build-apk.sh 34 / "1.29". No new permissions (27),
+zero AccessibilityService references, RECEIVER_NOT_EXPORTED
+kept.
+
+VERIFICATION: WordDictHarness 316/316 (157 prior + 159 new:
+long codes, DictFile determinism/corruption, learned +
+graduation, two-table teach + conflict adoption, taught
+store, full-list round trip over the actual dictionary.txt,
+versions, scoped packet overloads). All 24 harnesses green (Updater 143, Share 145,
+AudioModem 71, NfcArm 40, Bridging 156, WalkieMode 70,
+WalkieLayout 30, Relay 28 live, AdbConnect 15,
+AppActivities 36, AppListCodec 22, BridgeGate 44, History 78,
+HoldWatch 64, LowData 124, Nat 190, RingMath 101, Setup 85,
+Subscription 75, Terminal 29, TerminalScroll 32, Wallet 56,
+Watchdog 58). APK 20,731,262 B, sha256 ed7bfb33…, versionCode
+34, same cert. Savings preserved (100→78, 89→63, 143→90,
+879→549) plus tail-word savings (118→70). **Still unproven
+until Adam's phone**: the first-launch fetch + build, the
+Settings row transitions, two-phone teaching, restart
+persistence, and the late-joiner note.
+
+## v1.28 (2026-11-16) — word-dictionary message compression
+
+Adam's design (2026-11-16): a dictionary translating words into a
+single character with a superscript or subscript digit; messages
+encode on send and decode on receipt, so less data travels. It
+applies to walkie TEXTS on all three roads (mesh/LAN, Bluetooth,
+relay) and to chat (relay DMs). The audio modem is untouched — it
+carries keys and cards, never chat text — so the size win lands
+on mesh/Bluetooth/relay text payloads.
+
+CODE SPACE: 62 base symbols (a-z, A-Z, 0-9) x 10 digits x 2
+positions (superscript / subscript) = 1,240 codes. The
+dictionary is 1,200 entries (40 codes spare), compiled from
+general word-frequency knowledge — the most common English
+words, contractions, and the app's own vocabulary (channel,
+mesh, relay, walkie, bridge, gateway, quiet, filter, ...). The
+ordered word list IS the table: a word's code index is its
+position in `WordDict.WORDS`, and index arithmetic derives
+(symbol, digit, position). Entries are never reordered or
+removed within a version — only appended, with a version bump.
+
+WIRE FORM: two bytes per code. Byte one is the base symbol;
+byte two is a base-20 digit: '0'-'9' for superscript 0-9,
+'a'-'j' for subscript 0-9 (the second byte is the raw
+remainder, so e.g. index 1 is "a1" — digit 0, subscript —
+and index 10 is "aa" — digit 5, superscript). Both bytes are
+printable ASCII. DISPLAY FORM (humans only, never sent):
+the symbol plus a real Unicode superscript/subscript digit,
+via `WordDict.displayForm()`.
+
+ESCAPES: words outside the dictionary — names, places, rare
+words, numbers, emoji, ALL-CAPS — travel spelled out inside
+an escape: '~' + two decimal digits of length + the raw run,
+chunked at 99 chars. Nothing ever fails to send. Punctuation
+and whitespace pass through verbatim. A '~' in a message
+travels inside an escape, so it can never be mistaken for
+one. Length counts UTF-16 chars, the units both Java
+endpoints share.
+
+CAPITALIZATION (one rule): a word encodes when it matches
+ignoring case AND (all-lowercase, or exactly the stored
+form, or Capitalized at a sentence start). Sentence start =
+first word, or a word after sentence-ending punctuation plus
+whitespace. On decode, a sentence-start code ALWAYS decodes
+capitalized — a lowercase sentence-start normalizes to a
+capital, the way phone keyboards autocapitalize. The
+dictionary stores "I" and its contractions capitalized, so
+"i" normalizes to "I" and "i'm" to "I'm". Those two
+normalizations are the only cases where decode does not
+reproduce the input byte for byte; everything else
+round-trips exactly. Both the encoder and the decoder track
+sentence state over the same character stream, so they
+always agree.
+
+FRAMING: encoded payloads carry the marker `"wd":1` in the
+existing envelope — the relay JSON key
+(`LowDataEnvelope.build`, `BridgeRule.buildRelayedText`),
+the mesh/Bluetooth 'T' packet key (`MeshNet.putText`,
+`BtWalkie.putText`), and the chat envelope
+(`ChatThreadView.sendText`). No marker means plain text.
+`WordDict.encode()` returns null when coding would not save
+bytes (wire + 8-byte marker overhead vs raw), so short
+messages keep the exact pre-v1.28 shape and the wire is
+never longer than today. Decode sits at the single receive
+point per road (`WordDict.decodeMarked`, `LowDataEnvelope.
+parse`, `ChatThreadView.unwrap`, the 'T' handlers), so every
+road shares the rule. A receiver whose dictionary version
+differs, or a payload that fails to parse, renders
+UNDECODED with an honest note ("Sent with a newer word
+list (vN) — shown as sent." / "Couldn't decode this message
+— shown as sent.") instead of decoding wrong; decode never
+throws. The note rides the thread entry as `wdNote` and
+shows under the text; a noted entry is never spoken aloud
+(coded text read aloud is gibberish) and never bridged (the
+gateway cannot vouch for content it cannot read, and
+re-coding coded text would hand the far side a
+doubly-wrapped payload).
+
+OLD-BUILD DEGRADATION (honest): a pre-v1.28 build ignores
+the unknown "wd" key and shows the coded text — odd-but-
+printable ASCII, never garbage bytes, never a crash. Both
+phones need v1.28 for the savings and for readable text;
+mixed-version pairs still communicate, with the old phone
+seeing codes on longer messages.
+
+MEASURED SAVINGS (harness-printed, UTF-8 bytes, marker
+charged): 100 -> 78, 89 -> 63, 143 -> 90 on sample
+messages; a 879-byte all-common message codes to 549 bytes
+(37% smaller). Short and mostly-unknown messages stay
+plain — the savings rule guarantees the wire never grows.
+
+ALSO IN THIS VERSION: `ChatThreadView`'s open/unkeyed
+branch now unwraps the chat envelope like the keyed branch
+does, so a word-coded message decodes on an unkeyed channel
+exactly as on a keyed one. Side effect, and an improvement:
+a plain envelope on an unkeyed channel now shows its text,
+not its JSON.
+
+FILES: new `WordDict.java`, `harness/WordDictHarness.java`;
+edited `LowDataEnvelope.java`, `RelayIngest.java` (Decoded
+gains `wordNote`, 7-arg constructor — SubscriptionHarness
+updated to match, no behavior change), `BridgeRule.java`,
+`MeshNet.java`, `BtWalkie.java` (Listener.onText gains the
+`wordNote` parameter), `WalkiePage.java`,
+`SubscriptionService.java`, `ChatThreadView.java`,
+`build-apk.sh`, `run-launcher-harnesses.sh`.
+
+VERIFICATION: WordDictHarness 157/157 (new) + all 23 prior
+suites green (24 total; Relay 28/28 live). APK 20,718,974
+bytes, versionCode 33, same cert, 27 permissions.
+
+ON-DEVICE CHECKLIST (two phones): both on 1.28, coded
+messages decode exactly on all three roads including
+names/numbers/punctuation; a phone on 1.27 sees printable
+coded text on longer messages and plain text on short
+ones; the 1.27 -> 1.28 update arrives through Settings ->
+Updates (this release is published through the updater —
+see the site notes below). Nothing in the codec has run on
+hardware: the harness proves the rules, not the Android
+plumbing.
+
+SITE PUBLISH (v1.27 updater rule): every release regenerates
+`version.json` from the copied APK. v1.28 was published to
+launcher.eyeknow.app (APK + version.json + card facts +
+history line) and the live round trip verified (version.json
+200 with exact contents; APK 200, byte-identical SHA-256).
+
+## v1.27 (2026-11-16) — in-app updater, served from launcher.eyeknow.app
+
+Adam (2026-11-16): "Can we push updates without installing a new apk?"
+The straight answer: no — Android changes an app's code only
+through a package install, and the install tap is the user's,
+never skippable (the only exceptions are Play auto-update, a
+managed device, a system app, or root — none apply here). What
+can be built is the closest thing: the app checks for a new
+version, downloads it, verifies it, and hands it to the system
+installer. Adam said to build that.
+
+CHICKEN-AND-EGG: v1.27 itself arrives the old way — Adam installs
+it from the chat attachment, as usual. It is the first version
+carrying the updater; every version after it can arrive through
+the updater itself.
+
+### The flow
+
+One Settings row, "Check for updates" (new "Updates" group,
+before About), carries the whole flow — no popups, no banners
+anywhere else. The row always shows the installed version, and:
+
+- On launch, `UpdateManager.onAppLaunch` (from
+  `MainActivity.onCreate`) quietly fetches the manifest,
+  throttled to once an hour (`shouldQuietCheck`), failures
+  silent — no toasts on launch. The row reports the last
+  check honestly when Settings is opened, then refreshes.
+- The manifest is `https://launcher.eyeknow.app/version.json`,
+  fetched cache-busted (`?t=<millis>`) so a stale cached copy
+  can never hide an update. HTTPS only, always; redirects are
+  followed manually (max 5), each hop re-checked to be HTTPS.
+- An update is offered only when the manifest's versionCode is
+  STRICTLY greater than installed: no downgrades, no
+  same-version reinstalls. The row then names the new version
+  and size; tapping downloads the APK — never silently, never
+  in the background: 20 MB on mobile data downloads only on
+  the user's tap. Progress shows on the row.
+- Before any install is offered, the download must pass all
+  five checks in `UpdateVerify.verifyDownload`, in order:
+  SHA-256 equals the manifest's; size equals the manifest's;
+  package is `app.control.launcher`; version code equals the
+  manifest's; signing certificates are EXACTLY the running
+  app's (same set, no more, no fewer — an APK signed with any
+  other key is never offered). Any failure deletes the file
+  and names what failed on the row; no install is offered.
+- Install goes through the standard `ACTION_VIEW` intent (APK
+  MIME, content URI through the v1.25 `ApkShareProvider`
+  token pattern — the build has no AndroidX, so no
+  FileProvider). The install tap is Android's and can never
+  be skipped; no copy in the app promises otherwise. If the
+  "install unknown apps" grant for Control is missing
+  (`canRequestPackageInstalls`), the row says so honestly and
+  opens the exact system setting
+  (`ACTION_MANAGE_UNKNOWN_APP_SOURCES` for this package).
+- The verified file lives in the app's private cache. It is
+  deleted on any verification failure, and on launch once its
+  version is the installed version (the update landed). It is
+  deliberately NOT deleted the moment the install is offered:
+  the installer reads the file through the provider after the
+  intent fires, and deleting it first would break the install.
+  A verified file for a newer version survives restarts, so a
+  downloaded update can be installed later; a fresh manifest
+  naming a still-newer version retires it.
+
+### Seams and permissions
+
+- `UpdateManifest` (pure Java): manifest parsing through
+  `RelayJson` (org.json stubs throw off-device), strict field
+  validation, cache-bust/HTTPS/resolution URL rules, the
+  strictly-greater decision, the quiet-check throttle.
+- `UpdateVerify` (pure Java): digest/certificate-set rules and
+  the five-check download decision with first-failure reasons.
+- `UpdateManager`: the I/O (fetch, download with progress,
+  streaming hash, `PackageManager` certificate reads with an
+  API 26/27 `GET_SIGNATURES` fallback) plus the pure row-line
+  and tap-decision functions the harness proves.
+- New permission (27 total): `REQUEST_INSTALL_PACKAGES`
+  (normal-level; the grant itself is the user's tap in
+  Settings). No other new permissions. `RECEIVER_NOT_EXPORTED`
+  untouched (x6); zero `AccessibilityService` references.
+
+### The site as the update source
+
+`~/workspace/launcher-site/version.json` is the manifest the
+app reads:
+`{"versionCode":32,"versionName":"1.27","apk":"control-launcher.apk",
+"sha256":"<full hex>","size":20706686}`. The site copy of the
+APK was replaced (v1.5 → v1.27), the download card and band
+updated, and one v1.27 history line added (CURRENT pill moved).
+Deployed as dpl_BEHTe1H6SuxCktvfANysbeCKJ5DG (READY); verified
+live: version.json 200 + application/json with the exact
+contents above, the APK downloading byte-identical
+(SHA-256 matches version.json and the local build), the page
+showing 1.27. EVERY future release must regenerate
+version.json from the copied APK — the app refuses anything
+whose checksum or key does not match it. (The site's README
+records this; the README itself is excluded from the deploy.)
+
+Verified: `./build-apk.sh` BUILD-OK; versionCode 32 /
+versionName 1.27; same signing certificate
+(`f646377d…f372a1c52`); apksigner verifies. APK: 20,706,686
+bytes, SHA-256
+`e9b3d5f0cc33cb0c4a30b4faf4c0261b0db099a514c639a4d068c044cf519338`.
+UpdaterHarness 143/143 (new) + all 22 prior suites green
+(Share 145, AudioModem 71, NfcArm 40, Bridging 156, WalkieMode
+70, WalkieLayout 30, Relay 28 live, AdbConnect 15,
+AppActivities 36, AppListCodec 22, BridgeGate 44, History 78,
+HoldWatch 64, LowData 124, Nat 190, RingMath 101, Setup 85,
+Subscription 75, Terminal 29, TerminalScroll 32, Wallet 56,
+Watchdog 58).
+
+On-device checklist (Adam): fresh install of 1.27 → Settings →
+Updates row shows "Version 1.27 — you're on the latest version"
+after its check, and no update is offered (the manifest names
+the installed version). The REAL update proof needs a FUTURE
+version on the site: publish 1.28, open Settings, and the row
+must offer the download → progress → verified → install (with
+the unknown-apps setting step on first use). The download,
+certificate check, install handoff, and grant flow have never
+run on hardware — the harness proves the rules, not the
+Android plumbing.
+
+## v1.26.1 (2026-11-16) — Control itself appears in the share-an-app list
+
+Adam (2026-11-16): "The launcher app isnt in the share list."
+Root cause, verified from code: `AppListStore.scan()` deliberately
+excludes the app's own package ("hide ourselves from the drawer"),
+and `ShareAppActivity.loadAsync()` fed the picker from
+`InstalledApps.all()` — that cached list. `SharePicker.shape()`
+sorts the own package first, but it never received it, so Control
+was absent from the share list even though v1.25 intended
+"Control first". The sort was never the bug; the feed was.
+
+Fix, in the share feed only: `loadAsync()` builds the self entry
+explicitly from its own `ApplicationInfo` — the real app label
+via `getApplicationLabel`, and the APK size through the same
+readable-file rule as every other row — and prepends it through
+a new pure-Java seam, `SharePicker.prependSelf()`, before
+`shape()`. The self row goes through shape()'s usual rules: an
+unreadable own APK (size <= 0) drops like any other row, never a
+row that fails when tapped, and a duplicate own entry in the
+feed collapses to the prepended one (first entry wins). The
+drawer exclusion in `AppListStore.scan()` is untouched — the
+drawer keeps hiding Control; only the share picker gains it.
+The share-sheet and hotspot/QR paths are byte-identical in
+behavior, and the self row shares exactly like any other row:
+the same signed APK bytes through the same provider/token path.
+No new permissions, no manifest change, no receiver change.
+
+ShareHarness grows a SELF_ROW leg (15 checks): own package
+present and first, real label + size, dropped when unreadable
+(size 0 and negative), duplicates collapsing to one with the
+prepended label/size winning, null feed yielding only the self
+row, blank label falling back to the package, input list
+unmodified. All 22 harnesses green (Share 145/145).
+
+On-device check: open Settings → Share an app → Control is the
+first row, with its true APK size, and shares like any other app.
+
+## v1.26 (2026-11-16) — NFC-triggered audio sharing: type tones + mesh join
+
+Adam's design (2026-11-16): an NFC tap puts the receiving phone
+in listening mode; the sender then plays audio packets carrying
+contact cards, messaging keys, walkie channel keys, and mesh
+configurations; initial tones identify the packet type. His two
+decisions: the frequency is "audible and reliable but close to
+ultrasonic" — as high as reliability allows — and the mesh
+packet contains instructions telling the receiver which mesh to
+connect to and how. APK: 20,694,398 B, sha256
+`469ba06cd01b22b44207c938fe2924ff54656ab06d157392ee31b28e0110528f`,
+versionCode 30 / "1.26", same signing key (cert SHA-256
+f646377d…a1c52) — installs over v1.25. NO new permissions (26,
+unchanged: NFC and RECORD_AUDIO were already held). NOT uploaded
+to the launcher site.
+
+### The NFC trigger: HCE + reader mode, arm signal only
+
+Android Beam is gone (removed in Android 10), so the tap is
+built on card emulation plus reader mode, asymmetric on
+purpose: reader mode disables card emulation on the device
+running it, so the SENDER shows the play screen (its HCE
+service presents) and the RECEIVER shows the listen screen
+(reader mode armed). The tap carries only an arm signal — ten
+bytes, `CTL-LISTEN` — and no key material or mesh data ever
+crosses NFC; all data travels by audio afterwards.
+
+- `ControlHceService` (HCE, `BIND_NFC_SERVICE`, category
+  `other` — never a payment, so no default-app selection) answers
+  a SELECT for the AID `F0` + `CONTROL` (`F0434F4E54524F4C`,
+  proprietary range) with the arm payload + `90 00`, and
+  anything else with `6A 82`. It is stateless and presents
+  whenever the system routes a tap here; the tap means
+  something only to a receiver whose listen screen is armed.
+- The listen screen arms reader mode on resume
+  (`FLAG_READER_NFC_A | FLAG_READER_SKIP_NDEF_CHECK`, IsoDep
+  transceive on the binder thread) and disarms on pause. No
+  NFC hardware, or NFC off, means no reader mode — the screen
+  still listens by sound alone and says nothing about a tap it
+  cannot hear.
+- `ListenArm` is the arm state machine (pure Java, harness-
+  proven): a tap NEVER arms listening by itself — it only
+  confirms a listen the user already armed by opening the
+  screen. Opening the screen is the arm; the tap is a
+  shortcut, never the only way in. A tap with no armed screen
+  does nothing. UI copy states the honest requirements: screen
+  on, phones back to back.
+- There is NO background launch: a TECH_DISCOVERED intent
+  filter would fire for any IsoDep tag (transit cards,
+  passports), so the tap works only while the listen screen is
+  open. NDEF Type-4 tag emulation is out of scope.
+- The listen timeout is unchanged from v1.8: 30 seconds, then
+  the screen says nothing was heard and offers Listen again.
+  The microphone is released on success, timeout, pause, and
+  destroy, as before.
+
+### The high-band modem: 14–17.5 kHz
+
+The modem moved from 16 kHz sampling / 1.25–2.75 kHz tones to
+48 kHz sampling with tones at 14000/14500/15000/15500 Hz (low
+group) and 16000/16500/17000/17500 Hz (high group) — a 500 Hz
+grid, 32 ms symbols, same dual-tone 16-ary FSK structure, same
+CRC-16 + preamble-estimated symbol length. The 16 kHz rate
+could not represent the high band at all (Nyquist 8 kHz); 48
+kHz is the native rate on most Android devices, and
+AudioKeyAudio propagates the rate from the one constant, so
+playback (MODE_STREAM, v1.9) and recording (MIC source) both
+moved with it.
+
+Why the 500 Hz grid and the Hann window: absolute frequency
+error scales with tone frequency, so a 1% clock offset is a
+170 Hz shift at 17 kHz — nearly the whole 200 Hz spacing of
+the old voice band. The wide grid plus a Hann-weighted 8 ms
+Goertzel window (neighbors near the window's first null, a
+shifted tone inside the wide main lobe) is what holds the
+impairment gates up here. The harness proves it: the full v1.8
+gate set passes at the new band — noise to 0 dB SNR, 30/80 ms
+echo, ±1% clock offset, 0.05x amplitude, and the combined
+leg. Margin beyond the gates, measured: noise holds to −5 dB,
+amplitude to 0.02x, clock offset fails past ±1% (real phone
+crystals are ~0.01%, so the gate keeps 100x margin). Air time
+grew by two symbols (the type tones): contact 5718 ms, invite
+and chat 3542 ms, mesh 3926 ms.
+
+BREAKING CHANGE, stated plainly: frames on the high band are
+NOT decodable by v1.25 and older (which listened at
+1.25–2.75 kHz), and vice versa. Both phones need v1.26 to
+share by sound. The on-device speaker→mic proof at the new
+band is Adam's test — the harness bounds the risk with
+simulated impairments only, and cannot see whether a phone's
+speaker and microphone reproduce 14–17.5 kHz cleanly, or
+whether OEM preprocessing filters those frequencies (the MIC
+source is already used, which avoids the voice-call processing
+path; whether a given device still filters is an on-device
+unknown).
+
+### Type-prefix tones and the type registry
+
+Every frame now starts with two type symbols after the sync,
+carrying the packet's kind before the payload: [silence]
+[preamble 8] [sync 2] [type 2] [length] [payload] [CRC] [silence].
+The decoder announces the type (`onTypeHeard`) as soon as the
+type symbols are settled behind a valid length read — the
+listen screen names what is coming ("Hearing a channel
+invite…") before the payload finishes — and on delivery the
+type must equal the CRC-protected kind byte in the payload, or
+the frame is refused exactly like a CRC failure. A flipped type
+tone can therefore never misroute a key. Unknown types are
+named honestly on the listen screen and ignored on delivery,
+never misrouted. The registry (`AudioKeyPayload.isKnownKind`)
+admits exactly:
+
+| kind | name | payload |
+| 1 | contact card | name + relay pubkey + DM key |
+| 2 | channel invite | number + mode + label + key (private only) |
+| 3 | chat key | name + channel key |
+| 4 | mesh join | road + host + address + channel id + name + keyed |
+
+The listener routes each decoded payload to the EXISTING import
+path for its type (contact import, chat-key import, channel
+join) via the same legacy JSON text the QR scan used to
+deliver — no second import system was built.
+
+### The mesh join packet (kind 4)
+
+Layout: `[kind:1][road:1][hostLen:1][host ≤32][addrLen:1]
+[addr ≤24][idLen:1][channelId ≤32][nameLen:1][channelName ≤32]
+[keyed:1]` (~127 bytes max, far under the 200-byte cap). Road 1
+is Wi-Fi Direct (addr = the host's device address); road 2 is
+LAN (addr = the host's IPv4 address). The channel identity is
+the slot identity (`Profile.slotIdentity`, wireId respected),
+so a slot that arrived by invite and moved numbers still
+matches; `keyed` says whether the channel needs a key the
+receiver must already hold.
+
+Sending ("Share mesh by sound" in the Mesh & LAN section) works
+only while hosting a live mesh or LAN session. Wi-Fi Direct
+needs the phone's own device address via
+`requestDeviceInfo` (API 29+ — below that, an honest failure);
+LAN uses the phone's site-local IPv4 address from interface
+enumeration (no permission, never loopback). The play screen
+states the PBC honesty note: Wi-Fi Direct still needs one
+system tap — accepting the connection on the sender's phone.
+
+Receiving ("Join by sound") decodes the packet on the armed
+listen screen and acts, naming the mesh first in the toast and
+the status line. The NFC tap + being on that screen IS the
+consent; there is no extra confirm dialog per packet, and
+nothing joins silently. The receiver matches the channel id
+against its own 50 slots: no match means a plain refusal
+("ask for the channel invite first") and no join. On a match
+it retunes to that slot (which stops any local session), then
+reuses the existing join paths: Wi-Fi Direct via
+`connectToPeer` with a stub device (the CONNECTION_CHANGED
+path creates the mesh session when the group forms, exactly as
+the manual Join mesh flow), LAN via `newMeshSession("LAN")` +
+`connectToHost`. A keyed-channel mismatch is refused at the
+mesh door by the existing hello keycheck, with its honest
+message. An unparseable address or an unknown road is refused
+plainly, never joined.
+
+### Listen-side proof
+
+The v1.8 listen path (AudioRecord MIC) was never proven
+on-device. This build proves it as far as the VM allows: the
+AudioModem harness decodes recorded-style buffers in 64-,
+320-, and 8192-sample chunks at the new band, with type tones
+and all four payload kinds, under the full impairment set —
+and the on-device checklist (in the delivery report) covers
+the two-phone exchange end to end: tap → listen → play →
+import/join, on both roads, including the keyed-channel
+refusal and the no-matching-channel refusal.
+
+### Files changed
+
+- `AudioModem.java`: 48 kHz, 14–17.5 kHz tones, Hann-weighted
+  Goertzel, type symbols + `onTypeHeard` + type/payload
+  cross-check.
+- `AudioKeyPayload.java`: kind 4 (mesh join), capped text
+  helper, `isKnownKind` registry, mesh JSON shape, kind names.
+- `AudioKeyAudio.java`: `onTypeHeard` plumbed through the
+  listener callback (playback path untouched).
+- `AudioKeyListenActivity.java`: EXPECT_MESH + `meshIntent`,
+  NFC reader mode, `ListenArm`, type announcements.
+- `AudioKeyPlayActivity.java`: `meshIntent` factory.
+- `WalkiePage.java`: "Share mesh by sound" / "Join by sound"
+  buttons, mesh packet sending, `handleHeardText` dispatch on
+  the JSON `app` field, mesh join handling.
+- `NfcArm.java`, `ListenArm.java`, `ControlHceService.java`,
+  `res/xml/apduservice.xml`: new. `AndroidManifest.xml`: HCE
+  service entry. `res/values/strings.xml`: service description.
+- `build-apk.sh`: versionCode 30 / "1.26".
+- `harness/AudioModemHarness.java`: 71 checks (50 prior + 21
+  new: type tones, mesh payload, band facts). New
+  `harness/NfcArmHarness.java`: 40 checks. All 22 harnesses
+  green (see the version footer in the delivery report for
+  counts).
+
+Untouched: walkie/bridging, Chat page, bridge/watchdog/overlay,
+subscriptions, wallet, terminal, share-an-app.
+
+## v1.25 (2026-11-16) — share an app with a nearby phone
+
+Adam's orders (2026-11-15): share the launcher (and the eyeKnow
+native app) with a nearby device; he approved hotspot + QR after
+being told a true captive portal needs root; then added the
+share-sheet method as well, with the ORDER: share sheet PRIMARY,
+hotspot + QR FALLBACK. The share covers ANY installed app — one
+build, no separate share flow inside the eyeKnow app. APK:
+20,686,137 B, sha256
+`8cca3c67317ecd09041d4ae7059ab8ce47af09f050b35c3f2e3023220a2bd4f2`,
+versionCode 29 / "1.25", same signing key (cert SHA-256
+f646377d…a1c52) — installs over v1.24. NO new permissions (26,
+unchanged). NOT uploaded to the launcher site.
+
+### The share screen (ShareAppActivity, from Settings)
+
+A "Share an app" row in Settings opens the picker: every
+launchable app, Control first, then alphabetical by label
+(SharePicker — pure Java). Each row shows the icon, label,
+package, and APK size. The list reuses the cached app list
+(AppListStore, which scans synchronously on first run, so the
+picker is complete even before any background scan) with a
+background refresh re-rendering on change. System apps with no
+launchable activity never appear: the cache holds launchable
+apps only, and sharing a system component's APK would help
+nobody on the other phone. Apps whose APK file cannot be read
+are dropped rather than shown as rows that fail when tapped.
+Tapping an app shows the two methods, share sheet first.
+
+### PRIMARY: the share sheet
+
+The app's installed APK bytes (`ApplicationInfo.sourceDir` —
+APK files are world-readable, no root) go out through
+`ACTION_SEND` with MIME `application/vnd.android.package-
+archive`, via a purpose-built provider, `ApkShareProvider`.
+The build carries no AndroidX, so there is no FileProvider to
+use — and the custom provider is narrower by design: it serves
+exactly ONE file, the APK registered for the current share,
+addressed by an unguessable 128-bit token, read-only. There is
+no path mapping and no way to ask for any other file. The
+provider is not exported; the receiving app reads only through
+the URI grant, which rides both the intent flag and ClipData
+(the combination the chooser reliably forwards). The copy
+states the receiving phone allows the install once (Android's
+own prompt) and that the file is the same signed build already
+on the phone, so updates install cleanly.
+
+### FALLBACK: hotspot + QR
+
+`WifiManager.startLocalOnlyHotspot` starts a hotspot with no
+internet; the SSID and password are system-generated, shown on
+screen, and encoded in a QR code. A minimal HTTP server
+(ShareHttpServer) binds to the hotspot interface's address
+only — never a wildcard — on an ephemeral port, and serves
+exactly two things: one download page and the selected APK.
+Routing is ShareHttp's exact-match rule (GET/HEAD, `/` or
+`/app.apk`, no percent-decoding), so every other path,
+traversal attempt, or encoded variant is a 404: no directory
+listing, no other files. The receiver — any Android phone, no
+app needed, no data needed on either end — joins the hotspot,
+scans the second QR (the download URL), and installs from its
+browser.
+
+Two QR codes, on purpose: one code holds one payload. The
+Wi-Fi config joins the network but opens nothing; the URL
+opens the browser but joins nothing. The screen shows both,
+with the network name, password, and URL as text for anyone
+who would rather type.
+
+NO captive portal, stated plainly in the code and the copy:
+the auto-popup portal page works by hijacking the client's
+internet check, which needs DNS control over the hotspot that
+Android does not give regular apps (root-only). The second QR
+code is the honest replacement, and nothing claims the page
+pops up on its own.
+
+The hotspot and server stop when sharing ends: the Stop
+button, picking a different app, backing out, or the screen
+closing. Rotation does not end a share (the manifest holds
+the configuration change) and a theme change does not rebuild
+the screen mid-share. The hotspot password is shown on screen
+by design — it is the user's own hotspot — and never logged.
+
+Two honest limits, both on-device questions: (1) Android
+exposes no API for the local-only hotspot's gateway address,
+so the address is picked by a heuristic over the enumerated
+interfaces (`ap`/`softap`, then `wlan`, then `p2p`, then any
+up interface with a site-local IPv4 — ShareHotspotState,
+harness-pinned). If the A16's hotspot interface does not
+match, the receiver cannot reach the page and the screen says
+so. (2) Whether the hotspot's password arrives quoted or bare
+from the reservation is handled both ways (one outer pair of
+quotes stripped), and the on-screen text lets the user verify
+it by eye.
+
+### Files
+
+New: `SharePayload.java` (QR strings, URL, page HTML, sizes),
+`ShareHttp.java` (routing), `SharePicker.java` (picker rules),
+`ShareHotspotState.java` (lifecycle + address selection),
+`ShareHttpServer.java`, `ApkShareProvider.java`,
+`ShareAppActivity.java`, `harness/ShareHarness.java`. Edited:
+`AndroidManifest.xml` (activity + provider, no permissions),
+`SettingsActivity.java` (the row), `build-apk.sh` (version
+bump), these notes. Untouched: walkie/bridging, Chat, bridge,
+watchdog, overlay, subscriptions, wallet, terminal.
+
+### Harnesses
+
+**ShareHarness (new, 130/130)**: Wi-Fi payload shaping and
+escaping, URL validation, page HTML + escaping, size
+formatting, the full routing table (including traversal and
+encoded variants), picker shaping, the hotspot state
+machine's full transition table, address selection, quote
+stripping. The server is not exercised over a loopback socket
+in the harness: the sandbox garbles JVM IPv4 loopback traffic,
+so a socket test would fail for sandbox reasons — the routing
+it would test is ShareHttp, pinned directly instead. All 20
+prior suites green at identical counts (Bridging 156/156,
+WalkieMode 70/70, WalkieLayout 30/30, Relay 28/28 live,
+AdbConnect 15/15, AppActivities 36/36, AppListCodec 22/22,
+AudioModem 50/50, BridgeGate 44/44, History 78/78, HoldWatch
+64/64, LowData 124/124, Nat 190/190, RingMath 101/101, Setup
+85/85, Subscription 75/75, Terminal 29/29, TerminalScroll
+32/32, Wallet 56/56, Watchdog 58/58).
+
+### On-device checklist (A16)
+
+1. Settings → Share an app: the picker lists every launchable
+   app, Control first, with sizes; eyeKnow is listed.
+2. Share-sheet send to a second phone (Bluetooth and Quick
+   Share): the receiver gets the APK, allows the install once,
+   and the app runs; sharing Control installs over the
+   receiver's existing copy when present.
+3. Hotspot + QR send to a phone with no launcher: the hotspot
+   starts, both codes scan, the page loads in the browser, the
+   APK downloads and installs.
+4. Hotspot + server stop on close: after Stop, back-out, or
+   closing the screen, the hotspot is gone (the other phone
+   loses the network) and nothing keeps serving.
+5. Rotation mid-share keeps the hotspot up; the screen's
+   wording never promises a captive portal or internet.
+
+## v1.24 (2026-11-16) — messages cross transports; Auto mode is the default
+
+Adam's order (2026-11-15): "I want the messages to be available to
+anyone regardless of the connection method. For example if a
+device is connected through a mesh, it gets passed to all devices
+and then gets published to a channel when a phone has data." Plus
+a same-night addition: AUTO MODE IS ENABLED BY DEFAULT (below).
+No new permission (26 total).
+
+### Bridging: live only, no queue
+
+A message received on any transport — mesh/LAN, Bluetooth, or the
+internet relay — is forwarded live to all OTHER connected
+transports. A phone with data republishes mesh/Bluetooth messages
+to the relay channel immediately on receipt. There is NO
+store-and-forward queue in this version: messages that arrive
+while NO phone has data stay within the mesh, and only NEW
+messages publish once a phone gains data. The walkie Menu copy
+says exactly this, and no copy promises delivery to people who
+were offline.
+
+One switch in the walkie Menu, "Bridge messages across transports",
+default ON, turns all forwarding off; with bridging off, behavior
+is exactly v1.23. The tuned channel's messages AND subscribed
+channels' messages both bridge: subscription arrivals are stored
+by the service, and the walkie page's pending scan (on the
+subscription broadcast and on page show) makes each stored relay
+entry's one bridge decision — the local sessions live on the page,
+so the service itself never forwards. Each entry gets exactly one
+decision (`bridgeSeen`), forwarded or not, so a later scan never
+republishes an old message when a road comes up; entries stored by
+a pre-v1.24 build (no bridge id) are marked seen and never bridged,
+so upgrading never republishes history.
+
+Bridged arrivals flow through the SAME pipelines — RelayIngest /
+store, read-aloud (QUIET absolute), played → History (unplayed
+until played). Mode (Auto/Voice/Text) applies to what THIS phone
+sends, never to bridged content. Bridging never triggers during an
+active transmission from this phone (`recording || transcribing`),
+each transport has a single-flight guard (a skipped forward is
+never retried), failures on one transport never block the others,
+and nothing logs message contents or keys.
+
+### Provenance: the gateway vouches for delivery, not authorship
+
+The gateway CANNOT sign as the sender — a relayed message is
+signed/sent by the gateway, and the UI marks it "relayed by
+\<gateway name\>". Provenance rides the PAYLOAD, not the client
+message id: the relay's idempotency is per-sender and the id is
+1–128 chars, so it can neither hold the fields nor dedup across
+gateways. The fields are the bridge id (`bid`), the original
+sender's name and relay pubkey (`orig`, `origPub`), the original
+timestamp (`ots`, a string of millis — one representation for
+both parsers), the gateway's name (`via`), and the traversed
+roads (`trav`).
+
+- Relay texts: the fields are extra keys in the LowDataEnvelope
+  object. Old builds ignore the unknown keys and show the text
+  as from the gateway.
+- Relay bursts: one header line of JSON + newline + the raw
+  ADPCM bytes verbatim. New builds strip the header before
+  playback; old builds play a ~25ms click from the small header
+  and then the real audio intact. Header parsing works on BYTES
+  (the first 0x0A), never on a decoded string.
+- Mesh/Bluetooth packets: the same keys in the packet JSON; the
+  `from`/`name` field already carries the original sender's
+  name. Old receivers ignore the unknown keys.
+
+### One identity per message: the mid/bid design
+
+Two gateways forwarding the same message must mint the SAME
+bridge id, or receivers land it twice — and the originator's own
+relay post must share the bid, or every voice burst doubles (own
+voice streams live AND always posts to the relay). So the bid is
+derived from the message's origin identity, identically by the
+originator and by every gateway:
+
+- Every mesh/Bluetooth packet carries a `mid` (UUID, minted per
+  message/spurt). A direct local receipt's bid is `"m:" + mid`.
+- The page mints ONE mid per voice spurt, passes it to the local
+  spurt-starts, and the relay post uses client message id
+  `"m:" + mid` — so the originator's post and any gatewayed copy
+  share one bid and receivers dedup.
+- A relay receipt's bid is the carried bid (relayed), else the
+  client message id verbatim when it starts with `"m:"`, else
+  `"r:" + clientMsgId`, else a fresh UUID.
+- A packet with no mid (a pre-v1.24 sender) gets a fresh bid per
+  receiver: duplicates across gateways are then possible, and
+  accepted — the sender predates bridging.
+
+Every received entry is stamped with its derived bid at ingest,
+and the cross-road duplicate check applies to ALL arrivals. Own
+entries are stamped with the same bid a gatewayed copy would
+carry, so a phone's own message coming back through a gateway
+dedups instead of landing twice.
+
+### Loop prevention, and its honest limit
+
+Two mechanisms: (1) the bid — a phone that already forwarded a
+bid never forwards it again (the forwarded set is persisted in
+the store, cap 500 FIFO, ids only, so a restart cannot
+re-forward), and a thread entry carrying a bid suppresses the
+same message arriving on another road; (2) the traversed set —
+never forward back to a road the message already traversed.
+Consequence: mesh→relay→mesh is blocked, so TWO SEPARATE MESH
+GROUPS CANNOT BRIDGE VIA THE RELAY. That is a deliberate limit
+of the traversed-set rule, not a bug; lifting it needs a
+different loop rule and is future work.
+
+Private channels: only members holding the channel key forward,
+checked explicitly at every forward decision (the crypto already
+enforces it in practice). A non-member gateway carries nothing.
+
+### Voice bridging mechanics
+
+Live mesh/Bluetooth bursts normally leave no thread record — but
+a bridged burst gets one (with its blob, unplayed, never
+auto-played), so tap-to-play works and the bid dedups the relay
+copy. When nothing forwards, NO entry is created: exactly v1.23.
+Spurt capture is capped at 60 seconds of audio (PCM 1,920,000
+bytes / ADPCM 480,000 bytes); a longer spurt plays live but is
+not bridged, rather than bridged truncated. Voice re-stream:
+mesh = ADPCM decoded to PCM in 1280-byte chunks (the live path);
+Bluetooth = ADPCM in 800-byte frames. Socket backpressure paces
+the re-stream; no sleeps. Mesh and Bluetooth sessions are
+mutually exclusive on one phone, as before.
+
+### Auto mode is the default (v1.24 addition)
+
+The default walkie mode choice is now Auto — for fresh installs
+AND for upgrades where the user never explicitly picked
+Voice/Text. The v1.23 one-time migration (which wrote Voice/Text
+from the old low-data switch) is REMOVED: it must never write an
+implicit choice. A stored mode value is respected as the user's
+explicit choice; absence of a stored value means Auto. (v1.23
+never reached a device, so no installed base carries migrated
+values — but the stored-value case is handled correctly anyway.)
+The mode UI shows Auto selected by default, a manual override
+takes effect immediately, the face shows the Auto measurement
+line by default, and the `lowdata_on` sync from Auto's decision
+is unchanged. `WalkieMode.parseChoice` now falls back to AUTO
+for null/empty/unknown values; `migrateChoice` and the
+`KEY_WALKIE_MODE_MIGRATED` pref are gone. The WalkieMode harness
+gains a defaults leg (fresh prefs → Auto; stored Voice/Text
+respected; explicit switches stick): 70 checks.
+
+### Files
+
+New: `BridgeRule.java` (pure Java + org.json: the fan-out rule,
+provenance shapes, bid derivation, entry stamping) and
+`harness/BridgingHarness.java` (156 checks: envelope/burst/packet
+round-trips, the fan-out matrix, bid derivation, two-phone
+ping-pong and three-phone chain loop simulations, two-gateway
+dedup, private member-only, switch-off, stamping, RelayIngest
+decode of relayed payloads, forward-stamp accumulation).
+Changed: `RelayIngest` (decode parses relay provenance, strips
+burst headers), `MeshNet` / `BtWalkie` (mid in packets, provenance
+in listener callbacks, `*As` forward sends), `WalkieStore`
+(persisted forwarded-bid set), `WalkiePage` (bridge switch +
+copy, spurt capture, fan-out, relay re-publish, pending scan,
+relayed marking, spurt mid plumbing, bid stamping),
+`SubscriptionService` (bid stamping + cross-road dedup on
+background arrivals), `Prefs` / `WalkieMode` (Auto default, no
+migration), `harness/WalkieModeHarness` (defaults leg),
+`harness/SubscriptionHarness` (the 6-arg `Decoded` constructor),
+`build-apk.sh` (versionCode 28 / "1.24"). Untouched: Chat page,
+bridge/watchdog/overlay, subscriptions polling schedule,
+tuner/face layout, low-data path, wallet, terminal.
+
+### Verification
+
+BridgingHarness 156/156 + all 19 prior suites green
+(WalkieMode 70, WalkieLayout 30, Relay 28 live, AdbConnect 15,
+AppActivities 36, AppListCodec 22, AudioModem 50, BridgeGate 44,
+History 78, HoldWatch 64, LowData 124, Nat 190, RingMath 101,
+Setup 85, Subscription 75, Terminal 29, TerminalScroll 32,
+Wallet 56, Watchdog 58). On-device proof still needed: two-phone
+bridging in all directions, relayed marking, private member-only,
+switch off = v1.23, 60s+ spurts, transmission-during-receipt,
+subscription-arrival bridging, Auto default on a fresh install
+and stored-choice respect, both themes.
+
+## v1.23 (2026-11-16) — the walkie looks like a real walkie; the mode follows the connection speed
+
+Adam's orders (2026-11-15): "The walkie talkie looks way cluttered.
+Make it look like a real walkie. Automatically set the mode by
+testing the network speed." (The third order in that message —
+messages available regardless of connection method, mesh bursts
+bridged to the relay — is v1.24, a separate build, and is NOT in
+this version.) No new permission (26 total).
+
+### The radio face (WalkiePage, WalkieLayout, TunerView, SpeakerGrilleView)
+
+The walkie page is now a handheld radio. A rounded-rectangle body
+in the theme's surface tones holds, top to bottom: a channel
+display window (row 1: the channel number + name + FRS frequency +
+open/private; row 2: the road/signal line; row 3: the mode line),
+the channel knob row (CH−, the tuner, CH+), a status strip of up
+to three lines (talker / members / channel status — each line
+only when it has something to say), a drawn speaker grille that
+absorbs the remaining space, and a LARGE round PTT button as the
+dominant control. Below the body, one access row: **Messages**,
+**Menu**, **Scan**.
+
+The v1.20 rule stands: the face never scrolls. `WalkieLayout`
+owns the face budget — header 32dp, body padding 10/10, display
+88, knob 56, status 18 per line (max 3), grille minimum 40, PTT
+128, access row 36 — 450dp with one status line, 486dp with
+three, against 568dp of usable height on a 360×640 screen with
+gesture navigation (82dp of slack, absorbed by the grille). The
+v1.20 corner case (the speech-model block clipping the roads row
+on a 360×640 screen with 3-button navigation) is gone: the model
+block moved off the face entirely.
+
+The tuner IS the channel knob: the same drag-with-detents,
+haptics, and glide, now drawn as a knurled knob cylinder
+(rounded rect + ridges sliding with the drag offset, ticks and
+numbers and the needle kept). Circular drag was rejected: the
+knob is a wide bar, not a circle, and a ring gesture would be a
+second gesture to learn. Tap the display window for direct tune
+(the same dialog); CH± and Scan remain.
+
+Everything else moved behind clean access points, with no copy
+changed where it moved and nothing dropped:
+
+- **Messages** opens the messages panel: the thread (scrolls
+  internally within the panel, with the same bottom padding for
+  the join-sound block), the composer row, and History in the
+  composer row. The panel is a 480dp dialog that resizes for the
+  keyboard (`SOFT_INPUT_ADJUST_RESIZE`); the join-sound block
+  overlays the thread's bottom as before. The access row's
+  Messages button and the display window both carry the
+  unplayed count ("N new").
+- **Menu** opens the radio menu (a scrolling dialog): the
+  send-mode section (below), read-aloud, the subscription
+  switch, the private-channel action row (Listen / Share /
+  Invite / Private), and the roads row — each with its
+  verbatim info dialog. The roads row opens the same dialogs,
+  re-parented; nothing about the roads changed.
+
+The panels are built once with the page and live in an offscreen
+holder; opening one re-parents it into a dialog and closing
+returns it to the holder, so the thread's adapter, the model
+download state, and the join-sound block never rebuild. The
+pager still claims horizontal swipes except over the tuner and
+the PTT.
+
+`SpeakerGrilleView` is a new pure view: 5 columns × 3 rows of
+rounded slots, centered as a group, in `Ui.PANEL` on the body.
+Both themes use the same structure; the display window is the
+inset `Ui.PANEL` tone in both, and the PTT is the accent fill in
+both.
+
+### Automatic mode by speed test (WalkieMode, RelayCore, RelayClient, Prefs)
+
+"Mode" is voice bursts vs low-data text. The old low-data switch
+is now a three-way choice in the radio menu — **Auto / Voice /
+Text** — and Auto is opt-in, default OFF: the stored choice
+migrates exactly once from the old switch (on → manual Text,
+off → manual Voice), so current behavior is unchanged until
+Adam turns Auto on. The choice lives in `walkie_mode`
+(`walkie_mode_migrated` guards the one-time migration); the old
+`lowdata_on` key is kept in sync with the mode in force, so the
+existing low-data path — `LowDataSpeaker`, `SpeakGate`, the
+envelope, the model block, the transcription dialog — is fed by
+one seam (`lowDataOn()` = effective mode is TEXT) and nothing
+downstream changed.
+
+The probe is a timed round-trip, not a throughput test: a
+signed `GET /v1/channels` to the relay (the same signed,
+timestamped request the relay loop already makes, returning no
+message content), timed in milliseconds, bounded at 5s connect
+/ 5s read. Any HTTP round trip counts — even a 401 — because
+the question is whether the road answers, not whether the
+request was authorized. No user data, no new endpoint, no new
+request shape. `RelayCore.call` was refactored into `callRaw`
+(returning HTTP status, parsed JSON, and elapsed ms) plus the
+unchanged `call` wrapper, so the probe shares the exact signing
+and timeout code; `RelayClient.probe()` runs it on the relay
+pool and reports back on the main thread. The face reports
+milliseconds, never kb/s — a round-trip time is not a speed,
+and the UI must not claim it is.
+
+The decision (`WalkieMode.decide`, pure Java, harness-proved)
+has four precedences, in order:
+
+1. A manual choice (Voice / Text) always wins.
+2. A live local session (mesh, LAN, or Bluetooth) decides
+   VOICE under Auto — a nearby link is fast by definition, and
+   no probe is spent on it.
+3. A probe result, with hysteresis: TEXT at 1200ms or slower,
+   VOICE at 400ms or faster; between the two, the mode stays
+   where it was, so a borderline connection does not flap.
+   With no previous mode, the first probe decides (slow →
+   TEXT, otherwise VOICE).
+4. No probe result (none yet, or the probe failed) keeps the
+   last decision; with no previous mode, VOICE.
+
+Re-test triggers: on entering the walkie page, on road change
+(a local session starting or ending), and once a minute while
+idle on the page (60,000ms, `PROBE_INTERVAL_MS`). Never during
+an active transmission (recording or transcribing), never
+doubled (single-flight), never after the page is destroyed.
+The probe costs one small signed request per minute at most —
+well inside the relay's 600 req/min per-key limit, and it
+shares the poller's budget, not a second one.
+
+The face is honest about all of it. The mode line reads, for
+example, "Auto · 142 ms · Voice", "Auto · local · Voice",
+"Auto · no probe yet · Voice", "Auto · relay unreachable ·
+Voice", "Voice", or "Text (model not downloaded)". The
+road/signal line shows signal bars from the same round-trip
+time (≥4 bars at ≤150ms, 3 at ≤400ms, 2 at ≤1200ms, 1 above,
+4 bars for a local session, none when unmeasured) next to the
+road: the live local session with its member count or peer
+name, "Relay unreachable" after a failed probe, else
+"Internet". A failed probe never changes the mode — only the
+wording.
+
+### Harnesses
+
+- **WalkieModeHarness (new, 64/64)**: choice parse/store/
+  migrate, the full decide() precedence table (manual >
+  local > probe+hysteresis > previous, null-previous and
+  boundary values at 400/1200ms), signal bars/text, and the
+  exact face wording of `describe()` for every state.
+- **WalkieLayoutHarness (rewritten for the face, 30/30)**:
+  the face budget at 360×640 (gesture and 3-button) and A16
+  sizes, the display-window rows, the knob/PTT/grille
+  geometry, and the no-scroll invariant.
+- All 18 prior suites green (RelayHarness 28/28 against the
+  live relay, proving the `RelayCore` refactor).
+
+## v1.22 (2026-11-16) — view and launch an app's activities
+
+Adam's order (2026-11-15): "I also want a way to view and launch
+activities of an app." Long-pressing an app in the Apps sheet now
+opens a popup menu (the anchored-PopupMenu pattern from the v1.13
+Connections redesign) with two entries: the favorite toggle the
+long-press used to do directly, and **View activities**. Tap-to-
+launch, the cached app list, and everything else are untouched. No
+new permission (26 total).
+
+### The activities screen (AppActivitiesActivity)
+- **Queried on demand, never cached**: `getPackageInfo` with
+  `GET_ACTIVITIES` runs on a background thread when the screen
+  opens, because a manifest can change with an update. A query
+  failure is an honest line on the screen ("That app is no longer
+  installed" / the failure's message), never a crash; an app with
+  no declared activities gets an honest empty state. The screen
+  header carries the app's icon + name + package, a count line
+  ("N activities · M openable"), and the one line that explains
+  the rule: Android only lets an app open another app's exported
+  screens.
+- **Every row**: the activity's label, its full class name, and
+  its exported state. The label is the activity's OWN label when
+  it declares one — the platform lookup falls back to the
+  application's label, which would print the app's name on every
+  row of an app whose activities declare no labels; when the
+  activity declares none (`labelRes == 0` and no
+  `nonLocalizedLabel`), the row shows the class's short name
+  instead. Rows sort alphabetically by label (case-insensitive,
+  class name breaking ties), not in manifest order.
+- **Tapping an exported activity** launches it with an explicit
+  intent naming its component (`ComponentName` + NEW_TASK). An
+  exported activity can still refuse — a permission requirement,
+  a removed target — so a SecurityException shows a toast naming
+  the refusal ("Android refused to open …" + the platform's
+  reason, capped) instead of crashing; any other launch failure
+  toasts honestly too.
+- **Non-exported activities are shown but marked** ("Not openable
+  from here"); tapping one restates the rule in a toast. The
+  screen promises nothing more: launching a non-exported activity
+  through the shell bridge is a governed-control decision for
+  later, and no copy on this screen mentions it.
+- **Activity aliases** appear as their own rows, launch by the
+  alias component name, and name their target ("alias for …").
+
+### Shared rules (ActivityList, pure Java)
+The shaping — short-name extraction, the label fallback, the
+alias flag + target short name, the sort, the count line — lives
+in `ActivityList`, so the harness proves the exact code the
+activity runs. Nameless entries produce no row; the input list is
+never modified.
+
+### Verification
+- `AppActivitiesHarness` (new): 36 checks — short names (dotted,
+  bare, inner-class `$`, trailing dot, null/empty), the label
+  fallback (null/empty/blank vs. a real label), build (dropped
+  entries, alias flags, input untouched), sort (case-insensitive,
+  class-name tiebreak), summary (singular/plural, zero/all
+  openable, empty/null).
+- All 17 prior harnesses re-run on the new tree at identical
+  counts (fresh compiles; Relay 28/28 against the live relay).
+  RECEIVER_NOT_EXPORTED intact; zero AccessibilityService
+  references in source, manifest, resources, and the dex.
+- No on-device test — Adam's tests: long-press an app, open its
+  activities, launch an exported one, check a non-exported one is
+  marked and refuses with the toast, check an app with many
+  activities reads alphabetically, check an alias row names its
+  target.
+
+## v1.21 (2026-11-16) — the terminal transcript stops flashing away
+
+Adam's report (2026-11-15, on 1.18): "when I send a command to the
+terminal, the text clears before I can read it" / "I just see text
+flash." Two mechanisms fit the symptom, and this build kills both.
+TerminalActivity only — no other screen, no new permission (26
+total), no behavior change outside the terminal.
+
+### Mechanism 1: recreation wiped the transcript
+The transcript lived only in an in-memory StringBuilder; the
+activity had no `configChanges` handling and no saved instance
+state, so any recreation (rotation, any config change) rebuilt
+the screen back to the two header lines and the output was gone.
+Fix: `onSaveInstanceState` stores the transcript text (through
+the same cap rule the live transcript obeys — see below) and
+`onCreate` restores it instead of appending the headers. The
+headers are appended only on a genuinely fresh open, so a
+restored transcript never gains a second copy of them. The saved
+form holds redacted text only — the bridge token is masked at
+append time — so no secret is stored. The same path also covers
+process death while the terminal sits backgrounded. The
+theme-deferral is untouched (`recreateOnThemeChange` still
+false); a theme change still applies on the next open.
+
+### Mechanism 2: a layout change stole the scroll
+The only bottom-scroll was a one-shot `post(fullScroll)` after
+each render. A layout change after that post — the keyboard
+showing or hiding with `adjustResize`, a rotation — could reset
+the ScrollView's scroll position away from the new output, so
+the output flashed and was gone. Fix: the activity now tracks
+whether the user is pinned to the bottom (`TranscriptScroll
+.atBottom`: the visible window's end reaches the content's end
+within an 8dp slop, recomputed on every scroll change) and
+re-pins on layout changes — but ONLY while pinned. Two
+`OnLayoutChangeListener`s, because neither alone sees both
+causes: the ScrollView's own bounds change on resize, the
+child's on new output. `renderTranscript` captures the pin
+BEFORE `setText` (replacing the text can itself move the scroll
+offset, and the scroll listener would then report the transient
+position): pinned → scroll to the new output after layout;
+unpinned → restore the offset the user was reading at, so new
+output neither yanks them to the bottom nor jumps them to the
+top. A user who scrolled up to read earlier output is never
+moved; returning to the bottom re-pins.
+
+### Shared rules (TranscriptScroll, pure Java)
+The cap/trim rule and the at-bottom test live in the new
+`TranscriptScroll` class so the harness proves the exact code
+the activity runs: the cap (120,000) and keep (100,000) values
+moved there, and the activity's constants delegate to them.
+`trim` is the same rule the live transcript always applied
+(keep the last KEEP characters, `[earlier output trimmed]` at
+the head) — now shared between the append path and the
+saved-state path, and provably stable (trimming an
+already-trimmed transcript is a no-op, since KEEP + marker fits
+inside CAP). Echo lines, redaction, history, the Clear button,
+the preset flow, and the 120KB cap behavior are byte-identical.
+
+### Verification
+- `TerminalScrollHarness` (new): 32 checks — the at-bottom
+  boundaries (exact bottom, one pixel above, slop edge,
+  short/empty content, negative slop, overscroll), the trim
+  rule (under/at/over cap, tail-keeping, null/empty, keep 0,
+  stability), and the shipping-constants precondition.
+- All 16 prior harnesses re-run on the new tree at identical
+  counts (fresh compiles; Relay 28/28 against the live relay).
+  RECEIVER_NOT_EXPORTED intact; zero AccessibilityService
+  references in source, manifest, resources, and the dex.
+- No on-device test — the flash in hand is Adam's test: send a
+  command and read the output; rotate the phone mid-output and
+  confirm the transcript survives; scroll up, send a command,
+  confirm the view is not yanked; long output still trims at
+  the cap with the marker.
+
+## v1.20 (2026-11-16) — the walkie page does not scroll
+
+Adam's order (2026-11-15): "the walkie talkie page shouldn't scroll."
+The page is now a FIXED vertical column — header, readout, tuner,
+control rows, status lines, talk button, three switch rows, thread,
+composer, roads row — and ONLY the message thread region scrolls,
+internally. No control was dropped; the layout was rearranged and
+resized to fixed proportions, with the thread taking whatever height
+is left. Walkie page only — every other page, and every walkie
+behavior (mesh/Bluetooth/relay, tuner, hold-to-talk, low-data,
+read-aloud, subscriptions, History, bridge/watchdog/overlay, Chat),
+is untouched.
+
+### How the fixed layout works
+- **The ScrollView is gone.** WalkiePage builds its children directly
+  into itself (a vertical LinearLayout). `WalkieLayout` (pure Java)
+  owns every fixed height in one place, and the layout code builds
+  to those numbers: page padding 8/4, header 32, readout 54, tuner
+  52, step row 32, action row 34, status margin 4 + 20dp per line
+  (max 3), talk button 66 + 6 margin, three switch rows at 32 each,
+  composer 40, roads row 34. Fixed total in the typical state
+  (one status line): 482dp. The thread region (weight 1, floor
+  44dp) takes the rest: 86dp on a 360x640 screen with the system
+  bars, ~385dp on Adam's A16.
+- **Compact buttons, page-local.** `compactButton()` (32dp, no
+  vertical margins) replaces `Ui.smallButton` (40dp + 8dp margins)
+  on the page's own rows only — the shared Ui factory is untouched,
+  and the dialog-hosted road sections keep the roomier buttons.
+- **Readout condensed to one row.** The big number is 28sp (was 64),
+  frequency 15sp, label 14sp single-line ellipsized; the Open/Private
+  tag rides in the label line ("Worksite · Private") instead of the
+  old second mode line (the `modeLine` view is deleted; the mode is
+  still named on every retune). The tuner hint line is dropped — the
+  band, CH ±, and Scan are self-evident, and the roads explanation
+  lives in the Internet dialog.
+- **Status lines are bounded.** Status, talker, and members lines are
+  each capped at one line (ellipsized), so the status block can never
+  grow past 64dp; empty lines still collapse to zero height.
+- **Switch rows carry their status inline.** Low-data, read-aloud,
+  and background-listening are each one row — switch + one-line
+  status — so switch states never grow the page. The subscription
+  switch text is now the fixed "Listen in the background"; the
+  channel number rides in the status line ("Channel 12 — …"). The
+  three sections' full explanations survive VERBATIM in info dialogs
+  behind each status line (tap the line, marked ⓘ), which also show
+  the full current state — so a truncated blocker line is never a
+  mystery. The read-aloud status now reflects the switch ("On —
+  never speaks while Quiet is on." / "Off.").
+- **History rides in the composer row** (History / text field / Send),
+  still naming its count; the empty hint overlays the top of the
+  thread region, still managed by refreshThreadHint.
+- **The road sections moved into dialogs.** Mesh & LAN, Internet,
+  and Bluetooth are one tap away on the roads row. Each section view
+  is built ONCE into a hidden GONE holder and re-parented into its
+  dialog on open, back to the holder on dismiss — same live views,
+  same buttons, same listeners, full copy intact, never rebuilt.
+- **The join-sound block overlays the thread region.** On private
+  channels it sits at the bottom of the thread region (a FrameLayout)
+  instead of below the page, costing zero layout height; the list
+  pads its scrollable bottom by the block's measured height
+  (clipToPadding off), so no message hides under it. It stays pager
+  chrome: `ownsHorizontalGesture` returns false for touches starting
+  on it, exactly as when it was pinned below the old scrolling
+  column. The tuner anchor is now actually set (it was declared but
+  never assigned; the tuner already protected itself via
+  disallow-intercept, so this only makes the gesture check honest).
+
+### What does not fit, honestly
+One transient state can exceed a 360x640 screen WITH the 3-button
+navigation bar (568dp usable): the speech-model download block
+(~110dp, only while low-data mode is on and the model is missing).
+All three status lines populated at once still fits (thread 46dp,
+floor 44dp). In the download corner the roads row (the last child)
+can clip until the download finishes or is cancelled; with gesture
+navigation, or on any taller screen — including Adam's A16, where
+every state fits with 200dp+ to spare — it cannot happen. The model
+block stays inline (its progress must be visible while downloading);
+the corner is pinned by the harness, not hidden.
+
+### Verification
+- `WalkieLayoutHarness` (new): 35 checks — the constants are sane
+  (talk button ≥ 64dp, tuner ≥ 48dp, thread floor ≥ 40dp), the budget
+  arithmetic (status-line growth, model-block addition, clamping),
+  fit at 568/600/616/867dp usable in the realistic states, and the
+  known model-download corner pinned at a 68dp shortfall on 568dp.
+- All 15 prior harnesses re-run on the new tree at identical counts
+  (fresh compiles; Relay 28/28 against the live relay).
+  RECEIVER_NOT_EXPORTED intact; zero AccessibilityService references
+  in source, manifest, resources, and the dex; no new permissions
+  (26 total); ScrollView survives in WalkiePage only inside the two
+  dialog builders. No on-device test — the fixed layout in hand,
+  the thread's internal scroll, the dialogs, the overlaid join-sound
+  block, and the small-screen fit on Adam's A16 are his tests.
 
 ## v1.19 (2026-11-16) — channel subscriptions: the walkie keeps listening over the internet relay
 

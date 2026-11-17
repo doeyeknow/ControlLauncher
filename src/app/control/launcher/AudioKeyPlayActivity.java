@@ -111,6 +111,35 @@ public class AudioKeyPlayActivity extends ThemedActivity {
         return i;
     }
 
+    /** Mesh join sound (v1.26): the instructions another Control
+     *  phone needs to connect to this phone's mesh — which mesh,
+     *  which road, and how to reach the host. The sound carries
+     *  join instructions, not a channel key: a keyed channel
+     *  still needs its invite first. */
+    public static Intent meshIntent(Context c, int road, String hostName, String address,
+                                    String channelId, String channelName, boolean keyed) {
+        byte[] payload = AudioKeyPayload.mesh(road, hostName, address,
+                channelId, channelName, keyed);
+        boolean lan = road == AudioKeyPayload.ROAD_LAN;
+        Intent i = new Intent(c, AudioKeyPlayActivity.class);
+        i.putExtra(EXTRA_TITLE, "Mesh sound — " + channelName);
+        i.putExtra(EXTRA_MESSAGE, "This sound tells another Control phone "
+                + "how to join this mesh (" + (lan ? "same Wi-Fi network"
+                : "Wi-Fi Direct group") + ", channel " + channelName + "). "
+                + "The other phone listens from the Walkie page (Join by "
+                + "sound) and joins the mesh named in the sound."
+                + (lan ? "" : "\n\nWi-Fi Direct still needs one system tap: "
+                + "when the other phone asks to connect, accept it on "
+                + "this phone. That tap is Android's, not Control's.")
+                + (keyed ? "\n\nThis channel is keyed — the other phone "
+                + "needs the channel invite first, or the mesh will turn "
+                + "it away at the door." : ""));
+        i.putExtra(EXTRA_PAYLOAD, payload);
+        i.putExtra(EXTRA_AUDIT, "Mesh join sound for " + channelName
+                + " via " + (lan ? "LAN" : "Wi-Fi Direct"));
+        return i;
+    }
+
     /** Chat key for one conversation. */
     public static Intent chatKeyIntent(Context c, String name, String keyB64) {
         byte[] payload = AudioKeyPayload.chat(name, keyB64);

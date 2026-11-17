@@ -198,6 +198,10 @@ public class SubscriptionService extends Service {
     public void onCreate() {
         super.onCreate();
         serviceAlive = true;
+        // v1.29: the dictionary store must be initialized in
+        // the service process too, so background ingest can
+        // note received texts (idempotent with MainActivity).
+        DictStore.init(this);
         startForeground(NOTIF_ID, buildNotification());
         speaker = new LowDataSpeaker(this);
         worker = new Thread(this::workerLoop, "channel-subscriptions");
@@ -438,16 +442,48 @@ public class SubscriptionService extends Service {
             if (WalkieStore.hasCmid(this, t.identity, m.clientMsgId)) continue;
             RelayIngest.Decoded d = RelayIngest.decode(t.keyBytes, m.ciphertext);
             if (d == null) continue;
+            // v1.24: every arrival gets the bridge id derived
+            // from its origin identity, and one whose id is
+            // already in the thread arrived on another road
+            // first — it lands once. Bridging itself is the
+            // walkie page's job (the local sessions live
+            // there); the page's pending scan picks this
+            // entry up from the store on the broadcast
+            // below, or when it comes forward.
+            String bid = BridgeRule.relayArrivalBid(m.clientMsgId, d.relayed);
+            if (BridgeRule.entryWithBid(
+                    WalkieStore.thread(this, t.identity), bid)) {
+                continue;
+            }
             boolean mine = myPub.equals(m.sender);
             String from = mine ? myName() : ContactCard.senderName(this, m.sender);
+            String senderPub = m.sender;
+            if (d.isText) {
+                // v1.29: clean decodes teach the table their
+                // new words, and adopted teach-block codes
+                // mark this channel taught.
+                DictStore.noteReceived(t.channelId,
+                        new WordDict.Result(d.text, d.wordNote, d.adopted));
+            }
             JSONObject entry = WalkieStore.entry(
                     d.isText ? "text" : "voice", from,
                     d.isText ? d.text : "", "", d.samples,
                     "Internet", mine, "sent");
             RelayIngest.stampEntry(entry, m, d);
+            if (d.relayed != null) {
+                BridgeRule.stampRelayedEntry(entry, d.relayed);
+                try {
+                    entry.put("viaPub", m.sender);
+                } catch (Exception ignored) {
+                }
+                from = d.relayed.origName;
+                senderPub = d.relayed.origPub;
+            } else {
+                BridgeRule.stampBid(entry, bid);
+            }
             WalkieStore.append(this, t.identity, entry);
             broadcastMessage(t);
-            if (d.isText && !mine) speakEntry(t, entry, from, m.sender, d.text);
+            if (d.isText && !mine) speakEntry(t, entry, from, senderPub, d.text);
         }
     }
 
@@ -461,7 +497,18 @@ public class SubscriptionService extends Service {
     private void speakEntry(Target t, JSONObject entry,
                             String fromName, String senderPub, String text) {
         if (speaker == null) return;
-        VoiceProfile profile = Profile.voiceForSenderKey(this, senderPub);
+        // v1.28: an undecodable word-coded text is never
+        // spoken aloud — the page path applies the same
+        // rule (WalkiePage.hasWordNote), and the thread
+        // row carries the honest note instead.
+        if (!entry.optString("wdNote", "").isEmpty()) return;
+        // The sender's voice profile, resolved as the page
+        // resolves it: by relay pubkey when known, by display
+        // name otherwise (a relayed message that started on
+        // the mesh carries a name, not a key).
+        VoiceProfile profile = senderPub != null && !senderPub.isEmpty()
+                ? Profile.voiceForSenderKey(this, senderPub)
+                : Profile.voiceForSenderName(this, fromName);
         speaker.speak(this, text, profile, false, () -> {
             if (!HistoryRule.markPlayed(entry)) return;
             WalkieStore.saveNow(this);

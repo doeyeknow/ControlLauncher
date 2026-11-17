@@ -52,5 +52,12 @@ public class BootReceiver extends BroadcastReceiver {
         // Channel subscriptions resume on their own after a
         // reboot (a no-op when nothing is subscribed).
         SubscriptionService.reconcile(app);
+        // The hold-anywhere ring, too (v1.43): the bridge is
+        // down at boot, so this reconcile only records that —
+        // but if the bridge is somehow already up, the ring
+        // service starts without waiting for a Settings visit.
+        // The watchdog's post-restart reconcile is the path
+        // that normally brings it back.
+        OverlayRingService.reconcile(app);
     }
 }

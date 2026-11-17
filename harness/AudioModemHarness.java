@@ -30,12 +30,27 @@ import java.util.Random;
  *      truncate at a character boundary; malformed binaries rejected.
  *  11. TIMING: measured air time per payload kind, printed (the UI
  *      copy states these numbers — they must come from here).
+ *  12. TYPE TONES (v1.26): the initial tones announce the kind
+ *      before the payload finishes — onTypeHeard fires exactly
+ *      once per frame, before onFrame, with the right kind; the
+ *      frame's type matches payload[0]; a corrupted type symbol
+ *      is refused as a CRC error, never misrouted.
+ *  13. MESH PAYLOAD (v1.26): kind 4 encodes/decodes both roads,
+ *      rebuilds the join JSON shape, and rejects bad roads,
+ *      empty addresses, and empty channel ids; the kind registry
+ *      admits exactly kinds 1-4.
+ *  14. BAND (v1.26): 48 kHz, tones 14-17.5 kHz on a 500 Hz grid,
+ *      32 ms symbols — the high band Adam asked for, with the
+ *      impairment gates above proving it reliable.
  *
  * What this harness cannot prove: real phone speakers and microphones
  * (frequency response, AGC pumping, room echo beyond the simulated
  * tap), or two real phones in a real room — Adam's two phones are
  * the first acoustic test. The simulated legs bound the risk; they
- * do not eliminate it.
+ * do not eliminate it. The high band adds one more unknown the
+ * harness cannot see: whether a phone's speaker and microphone
+ * reproduce 14-17.5 kHz cleanly, and whether OEM preprocessing
+ * filters those frequencies — the on-device checklist covers it.
  *
  * Run (from ~/workspace/control-launcher):
  *   javac --release 17 -sourcepath src -d harness/classes \
@@ -59,10 +74,17 @@ public class AudioModemHarness {
 
     private static final class Sink implements AudioModem.Decoder.Listener {
         final List<byte[]> frames = new ArrayList<>();
+        final List<Integer> types = new ArrayList<>();
+        final List<Integer> heardTypes = new ArrayList<>();
         int crcErrors = 0;
 
-        @Override public void onFrame(byte[] payload) {
+        @Override public void onFrame(int type, byte[] payload) {
+            types.add(type);
             frames.add(payload);
+        }
+
+        @Override public void onTypeHeard(int type) {
+            heardTypes.add(type);
         }
 
         @Override public void onCrcError() {
@@ -253,7 +275,9 @@ public class AudioModemHarness {
         }
 
         // ---- 6. echo ----
-        Sink echo = run(withEcho(contactPcm, 480, 0.3), 320);
+        int echo30 = (int) (0.030 * AudioModem.SAMPLE_RATE);
+        int echo80 = (int) (0.080 * AudioModem.SAMPLE_RATE);
+        Sink echo = run(withEcho(contactPcm, echo30, 0.3), 320);
         check(echo.frames.size() == 1 && Arrays.equals(echo.frames.get(0), contact),
                 "decode with 30ms echo at 0.3 gain");
 
@@ -269,8 +293,9 @@ public class AudioModemHarness {
                 "loud noise yields no false frame");
 
         // ---- 8. corruption -> CRC error, no payload ----
-        // Symbol 12 = first data symbol after preamble+sync (index 10,11
-        // are sync; 12 is the high nibble of the length byte).
+        // Layout: preamble 0-7, sync 8-9, type 10-11, length 12-13,
+        // payload from 14. Corrupting 14 flips the first payload
+        // nibble (the kind byte), so the CRC must refuse it.
         short[] bad = corruptSymbol(contactPcm, 14);
         Sink badSink = run(bad, 320);
         check(badSink.frames.isEmpty() && badSink.crcErrors == 1,
@@ -310,14 +335,14 @@ public class AudioModemHarness {
         check(AudioKeyPayload.toJsonText(null).isEmpty(), "null decoded -> empty JSON");
 
         // ---- 10b. combined impairments + random payloads ----
-        short[] hostile = withEcho(resampled(withNoise(contactPcm, 10, 77), 1.01), 480, 0.3);
+        short[] hostile = withEcho(resampled(withNoise(contactPcm, 10, 77), 1.01), echo30, 0.3);
         Sink hs = run(hostile, 320);
         check(hs.frames.size() == 1 && Arrays.equals(hs.frames.get(0), contact),
                 "combined: 10dB noise + 1% clock + echo");
-        Sink echoStrong = run(withEcho(contactPcm, 480, 0.5), 320);
+        Sink echoStrong = run(withEcho(contactPcm, echo30, 0.5), 320);
         check(echoStrong.frames.size() == 1 && Arrays.equals(echoStrong.frames.get(0), contact),
                 "decode with 30ms echo at 0.5 gain");
-        Sink echoLong = run(withEcho(contactPcm, 1280, 0.2), 320);
+        Sink echoLong = run(withEcho(contactPcm, echo80, 0.2), 320);
         check(echoLong.frames.size() == 1 && Arrays.equals(echoLong.frames.get(0), contact),
                 "decode with 80ms echo at 0.2 gain");
         Random rnd = new Random(1234);
@@ -350,6 +375,120 @@ public class AudioModemHarness {
                 + "ms chat=" + chatMs + "ms");
         check(contactMs > 4000 && contactMs < 8000, "contact air time in range");
         check(inviteMs > 3000 && inviteMs < 7000, "invite air time in range");
+
+        // ---- 12. type tones (v1.26) ----
+        byte[] meshP2p = AudioKeyPayload.mesh(AudioKeyPayload.ROAD_P2P,
+                "Ada's Phone", "AA:BB:CC:DD:EE:FF", "open:7", "Channel 7", false);
+        check(meshP2p != null, "mesh p2p payload builds");
+        byte[][] typed = new byte[][]{contact, invite, chat, meshP2p};
+        int[] kinds = new int[]{AudioKeyPayload.KIND_CONTACT,
+                AudioKeyPayload.KIND_CHANNEL, AudioKeyPayload.KIND_CHAT,
+                AudioKeyPayload.KIND_MESH};
+        boolean typesOk = true;
+        for (int i = 0; i < typed.length; i++) {
+            Sink s = run(AudioModem.encode(typed[i]), 320);
+            if (s.frames.size() != 1 || s.heardTypes.size() != 1
+                    || s.heardTypes.get(0) != kinds[i]
+                    || s.types.size() != 1 || s.types.get(0) != kinds[i]
+                    || (s.frames.get(0)[0] & 0xFF) != kinds[i]) typesOk = false;
+        }
+        check(typesOk, "type tones announce each kind once, matching payload[0]");
+        // The announcement precedes the delivery.
+        List<String> events = new ArrayList<>();
+        AudioModem.Decoder orderDec = new AudioModem.Decoder(
+                new AudioModem.Decoder.Listener() {
+                    @Override public void onFrame(int type, byte[] payload) {
+                        events.add("F");
+                    }
+                    @Override public void onTypeHeard(int type) {
+                        events.add("T");
+                    }
+                    @Override public void onCrcError() {
+                        events.add("E");
+                    }
+                });
+        short[] orderPcm = AudioModem.encode(chat);
+        for (int i = 0; i < orderPcm.length; i += 320) {
+            int n = Math.min(320, orderPcm.length - i);
+            orderDec.feed(Arrays.copyOfRange(orderPcm, i, i + n), 0, n);
+        }
+        check(events.size() == 2 && "T".equals(events.get(0))
+                && "F".equals(events.get(1)), "type announced before frame delivered");
+        // A corrupted type symbol (index 10) disagrees with the
+        // CRC-protected kind byte: refused, never misrouted.
+        short[] badType = corruptSymbol(contactPcm, 10);
+        Sink bt = run(badType, 320);
+        check(bt.frames.isEmpty() && bt.crcErrors == 1,
+                "corrupted type tone -> CRC error, no misroute");
+        short[] badType2 = corruptSymbol(contactPcm, 11);
+        Sink bt2 = run(badType2, 320);
+        check(bt2.frames.isEmpty() && bt2.crcErrors == 1,
+                "corrupted second type tone -> CRC error, no misroute");
+
+        // ---- 13. mesh payload (v1.26) ----
+        Sink mp = run(AudioModem.encode(meshP2p), 320);
+        check(mp.frames.size() == 1 && Arrays.equals(mp.frames.get(0), meshP2p),
+                "mesh payload round-trips through the modem");
+        AudioKeyPayload.Decoded dm3 = AudioKeyPayload.decode(meshP2p);
+        check(dm3 != null && dm3.kind == AudioKeyPayload.KIND_MESH
+                && dm3.road == AudioKeyPayload.ROAD_P2P
+                && "Ada's Phone".equals(dm3.hostName)
+                && "AA:BB:CC:DD:EE:FF".equals(dm3.address)
+                && "open:7".equals(dm3.channelId)
+                && "Channel 7".equals(dm3.channelName) && !dm3.keyed,
+                "mesh p2p fields decode");
+        check(AudioKeyPayload.toJsonText(dm3).equals(
+                "{\"app\":\"control-mesh-join\",\"v\":1,\"road\":\"p2p\""
+                        + ",\"host\":\"Ada's Phone\",\"address\":\"AA:BB:CC:DD:EE:FF\""
+                        + ",\"channelId\":\"open:7\",\"channelName\":\"Channel 7\""
+                        + ",\"keyed\":false}"), "mesh JSON matches join shape");
+        byte[] meshLan = AudioKeyPayload.mesh(AudioKeyPayload.ROAD_LAN,
+                "Bob", "192.168.1.5", "priv:3:deadbeef", "Worksite", true);
+        AudioKeyPayload.Decoded dm4 = AudioKeyPayload.decode(meshLan);
+        check(dm4 != null && dm4.road == AudioKeyPayload.ROAD_LAN
+                && "192.168.1.5".equals(dm4.address)
+                && "priv:3:deadbeef".equals(dm4.channelId) && dm4.keyed,
+                "mesh LAN fields decode, keyed preserved");
+        check(meshP2p.length <= AudioModem.MAX_PAYLOAD
+                && meshLan.length <= AudioModem.MAX_PAYLOAD,
+                "mesh payloads fit the modem cap");
+        check(AudioKeyPayload.mesh(3, "H", "1.2.3.4", "open:1", "C", false) == null,
+                "bad mesh road rejected");
+        check(AudioKeyPayload.mesh(AudioKeyPayload.ROAD_LAN, "H", "",
+                "open:1", "C", false) == null, "empty mesh address rejected");
+        check(AudioKeyPayload.mesh(AudioKeyPayload.ROAD_LAN, "H", "1.2.3.4",
+                "", "C", false) == null, "empty mesh channel id rejected");
+        String longHost = "H".repeat(200);
+        AudioKeyPayload.Decoded dm5 = AudioKeyPayload.decode(AudioKeyPayload.mesh(
+                AudioKeyPayload.ROAD_LAN, longHost, "1.2.3.4", "open:1", "C", false));
+        check(dm5 != null && dm5.hostName.length() == 32,
+                "mesh host name truncates to 32 bytes");
+        check(AudioKeyPayload.isKnownKind(1) && AudioKeyPayload.isKnownKind(2)
+                && AudioKeyPayload.isKnownKind(3) && AudioKeyPayload.isKnownKind(4)
+                && !AudioKeyPayload.isKnownKind(0) && !AudioKeyPayload.isKnownKind(5)
+                && !AudioKeyPayload.isKnownKind(255),
+                "kind registry admits exactly kinds 1-4");
+        check("mesh invite".equals(AudioKeyPayload.kindName(4)),
+                "mesh kind name");
+        check(AudioKeyPayload.kindName(9).contains("doesn't know"),
+                "unknown kind names itself unknown");
+        int meshMs = AudioModem.airTimeMs(meshP2p);
+        System.out.println("AIR TIME mesh=" + meshMs + "ms");
+        check(meshMs > 2000 && meshMs < 6000, "mesh air time in range");
+
+        // ---- 14. band facts (v1.26) ----
+        check(AudioModem.SAMPLE_RATE == 48000, "sample rate is 48 kHz");
+        boolean gridOk = AudioModem.LOW_TONES.length == 4
+                && AudioModem.HIGH_TONES.length == 4
+                && AudioModem.LOW_TONES[0] == 14000
+                && AudioModem.HIGH_TONES[3] == 17500;
+        for (int i = 1; i < 4; i++) {
+            if (AudioModem.LOW_TONES[i] - AudioModem.LOW_TONES[i - 1] != 500) gridOk = false;
+            if (AudioModem.HIGH_TONES[i] - AudioModem.HIGH_TONES[i - 1] != 500) gridOk = false;
+        }
+        check(gridOk, "tones 14-17.5 kHz on a 500 Hz grid");
+        check(AudioModem.SYMBOL_SAMPLES * 1000 / AudioModem.SAMPLE_RATE == 32,
+                "symbols are 32 ms");
 
         System.out.println("---");
         System.out.println(checks + " checks, " + failures + " failures");

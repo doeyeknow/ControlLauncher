@@ -16,6 +16,15 @@ import android.view.View;
  * sweep; every detent you cross fires a haptic tick, and when you let
  * go the band settles onto the nearest channel with a short glide —
  * the feel of landing on a frequency.
+ *
+ * v1.23: the band is drawn as the radio's channel knob — a knurled
+ * cylinder the thumb turns by dragging. The gesture, the detents,
+ * the haptics, and the settle glide are unchanged; only the drawing
+ * changed, so the knob keeps the feel the tuner always had. A
+ * circular drag was considered and rejected: on a flat screen a
+ * rotary gesture is unreliable, and the drag sweep IS the knob
+ * turning — the ridges slide under the thumb exactly as a knurled
+ * knob's would.
  */
 public class TunerView extends View {
 
@@ -102,20 +111,44 @@ public class TunerView extends View {
         float centerX = w / 2f;
         float baseline = h * 0.68f;
 
-        // band background (the mockup's tuner panel tone)
+        // The knob: a rounded cylinder in the panel tone, edged
+        // with the line tone, its knurling drawn as vertical
+        // ridges that slide with the band.
+        float bandTop = h * 0.10f;
+        float bandBottom = h * 0.92f;
+        paint.setStyle(Paint.Style.FILL);
         paint.setColor(Ui.PANEL);
-        canvas.drawRect(0, h * 0.18f, w, h * 0.92f, paint);
+        canvas.drawRoundRect(0, bandTop, w, bandBottom,
+                Ui.dp(getContext(), 10), Ui.dp(getContext(), 10), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(1, Ui.dp(getContext(), 1)));
+        paint.setColor(Ui.LINE);
+        canvas.drawRoundRect(0, bandTop, w, bandBottom,
+                Ui.dp(getContext(), 10), Ui.dp(getContext(), 10), paint);
+        // Knurl ridges: fixed to the band, so they move as the
+        // thumb turns the knob.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(1, Ui.dp(getContext(), 1)));
+        paint.setColor(Ui.LINE);
+        float ridgeStep = Ui.dp(getContext(), 6);
+        float ridgePhase = offsetPx % ridgeStep;
+        for (float x = -ridgePhase; x < w + ridgeStep; x += ridgeStep) {
+            canvas.drawLine(x, bandTop + Ui.dp(getContext(), 3),
+                    x, bandBottom - Ui.dp(getContext(), 3), paint);
+        }
 
         // ticks + numbers
         for (int ch = 1; ch <= Profile.BANK_SIZE; ch++) {
             float x = centerX + (ch - 1) * spacingPx - offsetPx;
             if (x < -spacingPx || x > w + spacingPx) continue;
             boolean major = (ch % 5 == 0) || ch == 1;
+            paint.setStyle(Paint.Style.STROKE);
             paint.setColor(ch == nearestChannel() ? Ui.ACCENT : Ui.DIM);
             paint.setStrokeWidth(Ui.dp(getContext(), major ? 2 : 1));
             float tickTop = baseline - Ui.dp(getContext(), major ? 20 : 12);
             canvas.drawLine(x, tickTop, x, baseline, paint);
             if (major || ch == nearestChannel()) {
+                paint.setStyle(Paint.Style.FILL);
                 paint.setTextSize(Ui.dp(getContext(), 11));
                 paint.setTextAlign(Paint.Align.CENTER);
                 canvas.drawText(String.valueOf(ch), x, baseline + Ui.dp(getContext(), 15), paint);
@@ -123,9 +156,10 @@ public class TunerView extends View {
         }
 
         // needle — the space's amber signal color
+        paint.setStyle(Paint.Style.STROKE);
         paint.setColor(Ui.SIGNAL);
         paint.setStrokeWidth(Ui.dp(getContext(), 3));
-        canvas.drawLine(centerX, h * 0.10f, centerX, h * 0.95f, paint);
+        canvas.drawLine(centerX, h * 0.06f, centerX, h * 0.97f, paint);
     }
 
     @Override

@@ -56,6 +56,7 @@ public final class OverlayRingSource implements RingItems.Source {
             case CircleMenuView.ITEM_ACTIVITY: return activityRingItems();
             case CircleMenuView.ITEM_CONNECTIONS: return connectionsRingItems();
             case CircleMenuView.ITEM_WALLET: return walletRingItems();
+            case CircleMenuView.ITEM_CAMERAS: return camerasRingItems();
             default: return new ArrayList<>();
         }
     }
@@ -71,6 +72,8 @@ public final class OverlayRingSource implements RingItems.Source {
                 return "No conversations yet — exchange contact cards or start a chat";
             case CircleMenuView.ITEM_WALLET:
                 return "No cards saved yet — add one in the wallet";
+            case CircleMenuView.ITEM_CAMERAS:
+                return "No cameras yet — scan or add one on the Cameras page";
             default:
                 return "";
         }
@@ -280,6 +283,24 @@ public final class OverlayRingSource implements RingItems.Source {
         return out;
     }
 
+    /** Cameras: the saved cameras by name (mirrors
+     *  MainActivity's ringSource). The leaf routes through
+     *  MainActivity's EXTRA_CAMERA_ID, since the overlay
+     *  has no live page to open a detail view on. */
+    private List<RingItems.Item> camerasRingItems() {
+        List<RingItems.Item> out = new ArrayList<>();
+        try {
+            for (CamRecord rec : CamStore.list(app)) {
+                out.add(RingItems.Item.glyph(rec.displayName(), PageGlyphs.CAMERA,
+                        RingItems.Action.openCamera(rec.id)));
+            }
+        } catch (Exception e) {
+            // A store that can't be read shows no cameras
+            // here; the Cameras page itself reports it.
+        }
+        return out;
+    }
+
     // ---- routing ----
 
     /** A main-ring choice from the overlay: open MainActivity on
@@ -318,6 +339,9 @@ public final class OverlayRingSource implements RingItems.Source {
             case CircleMenuView.ITEM_WALLET:
                 startNewTask(app, new Intent(app, WalletActivity.class));
                 break;
+            case CircleMenuView.ITEM_CAMERAS:
+                openPage(app, MainActivity.PAGE_CAMERAS);
+                break;
             default:
                 break;
         }
@@ -355,6 +379,12 @@ public final class OverlayRingSource implements RingItems.Source {
             case RingItems.Action.OPEN_CONVO:
                 openConversation(app, action.text);
                 break;
+            case RingItems.Action.OPEN_CAMERA: {
+                Intent i = new Intent(app, MainActivity.class);
+                i.putExtra(MainActivity.EXTRA_CAMERA_ID, action.text);
+                startNewTask(app, i);
+                break;
+            }
             case RingItems.Action.HOME_ROLE: {
                 Intent i = new Intent(app, MainActivity.class);
                 i.putExtra(MainActivity.EXTRA_REQUEST_HOME_ROLE, true);

@@ -6,6 +6,7 @@ import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Typeface;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
@@ -34,7 +35,11 @@ import java.util.List;
  * The wallet (v1.7): cards stored on this phone, payment handed
  * off to the phone's real wallet app.
  *
- * Honesty rules, stated on the screen itself:
+ * The screen carries no explanations (v1.42): only the
+ * controls' own labels, card identifiers, and text reporting a
+ * result or a failure. The rules below are enforced in code —
+ * they used to be stated on the screen itself, and are not
+ * anymore:
  *  - Cards are DEVICE-LOCAL: the vault file is not part of the
  *    portable profile, so cards never travel with a profile
  *    export or import, and a profile wipe leaves them alone.
@@ -105,18 +110,8 @@ public class WalletActivity extends ThemedActivity {
         setContentView(scroll);
 
         root.addView(Ui.screenTitle(this, "Wallet"));
-        root.addView(Ui.body(this,
-                "Your cards live only on this phone, sealed with a key "
-                + "Android's keystore holds. Control never stores the "
-                + "security code, and cards never leave in a profile "
-                + "export — this wallet is device-local. Showing a full "
-                + "card number asks for your device credential first."));
 
         root.addView(Ui.section(this, "Pay"));
-        root.addView(Ui.body(this,
-                "Pay opens your wallet app — Google Pay or Samsung "
-                + "Wallet — where the tap happens. Control can't choose "
-                + "a card there; pick the card in the wallet app."));
         payButton = Ui.button(this, "Pay", true);
         root.addView(payButton, Ui.wrap(0, 10, 0, 0, this));
         payButton.setOnClickListener(v -> onPayPressed());
@@ -169,11 +164,13 @@ public class WalletActivity extends ThemedActivity {
             return;
         }
         if (cards.isEmpty()) {
-            statusLine.setText("No cards yet. Add one to keep it on this phone.");
+            // Empty wallet (v1.42): no text at all — the Add
+            // control below is the whole empty state.
+            statusLine.setText("");
             return;
         }
-        statusLine.setText(cards.size() == 1 ? "1 card stored on this phone."
-                : cards.size() + " cards stored on this phone.");
+        // The list speaks for itself; no count line (v1.42).
+        statusLine.setText("");
         for (WalletStore.Card card : cards) {
             cardList.addView(cardRow(card), Ui.wrap(0, 10, 0, 0, this));
         }
@@ -233,9 +230,7 @@ public class WalletActivity extends ThemedActivity {
     private void requestReveal(WalletStore.Card card, TextView numberView, Button showButton) {
         KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
         if (km == null || !km.isDeviceSecure()) {
-            Toast.makeText(this,
-                    "Set a screen lock first — Control won't show a card number without your device credential.",
-                    Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Set a screen lock first.", Toast.LENGTH_LONG).show();
             return;
         }
         if (Build.VERSION.SDK_INT >= 29) {
@@ -376,11 +371,6 @@ public class WalletActivity extends ThemedActivity {
         if (adding) form.addView(numberInput, Ui.wrap(0, 6, 0, 0, this));
         form.addView(monthInput, Ui.wrap(0, 6, 0, 0, this));
         form.addView(yearInput, Ui.wrap(0, 6, 0, 0, this));
-        TextView note = Ui.body(this, adding
-                ? "The number is encrypted on this phone before it is stored. "
-                + "Control never asks for or stores the security code."
-                : "The card number can't be changed — delete this card and add it again to change it.");
-        form.addView(note, Ui.wrap(0, 8, 0, 0, this));
 
         if (!adding) {
             nickInput.setText(existing.nickname);
@@ -441,28 +431,145 @@ public class WalletActivity extends ThemedActivity {
                     Toast.LENGTH_LONG).show();
             return;
         }
-        try {
-            if (existing == null) {
-                String digits = WalletCards.digitsOnly(numberInput.getText().toString());
-                if (!WalletCards.luhnValid(digits)) {
-                    Toast.makeText(this, "That card number doesn't check out.",
-                            Toast.LENGTH_LONG).show();
-                    return;
-                }
-                WalletStore.Card card = WalletStore.add(this, nickname, name, network,
-                        month, year, digits);
-                OwnLog.log(this, "Wallet",
-                        WalletCards.auditLine("added", card.nickname, card.last4));
-            } else {
-                WalletStore.updateMeta(this, existing.id, nickname, name, network, month, year);
-                OwnLog.log(this, "Wallet",
-                        WalletCards.auditLine("edited", nickname, existing.last4));
+        if (existing == null) {
+            String digits = WalletCards.digitsOnly(numberInput.getText().toString());
+            if (!WalletCards.luhnValid(digits)) {
+                Toast.makeText(this, "That card number doesn't check out.",
+                        Toast.LENGTH_LONG).show();
+                return;
             }
+            addCardWithRecovery(nickname, name, network, month, year, digits);
+            return;
+        }
+        try {
+            WalletStore.updateMeta(this, existing.id, nickname, name, network, month, year);
+            OwnLog.log(this, "Wallet",
+                    WalletCards.auditLine("edited", nickname, existing.last4));
         } catch (Exception e) {
             showStoreError("save that card", e);
             return;
         }
         refreshCards();
+    }
+
+    /** Add a card, with the v1.39 key-regeneration recovery.
+     *  When encrypt fails under every cipher supplier, the
+     *  persisted key entry itself may be unusable (the leading
+     *  theory — see WalletKeyRecovery): an empty vault
+     *  regenerates silently and retries once; a vault holding
+     *  cards asks first, naming the consequence. Any other
+     *  failure shape goes straight to the full-failure dialog
+     *  with nothing retried. */
+    private void addCardWithRecovery(String nickname, String name, String network,
+                                     int month, int year, String digits) {
+        Exception first;
+        try {
+            WalletStore.Card card = WalletStore.add(this, nickname, name, network,
+                    month, year, digits);
+            onCardAdded(card);
+            return;
+        } catch (Exception e) {
+            first = e;
+        }
+        if (!(first instanceof WalletCrypto.AllFailedException)) {
+            showFullFailure("Couldn't save that card", failureDetail(first));
+            return;
+        }
+        Integer count = null;
+        try {
+            count = WalletStore.list(this).size();
+        } catch (Exception ignored) {
+            // Unknown count: the decision asks, never assumes empty.
+        }
+        WalletKeyRecovery.Action action =
+                WalletKeyRecovery.decide(true, count, false);
+        if (action == WalletKeyRecovery.Action.REGENERATE_SILENTLY) {
+            retryAfterRegeneration(nickname, name, network, month, year, digits,
+                    failureDetail(first));
+        } else if (action == WalletKeyRecovery.Action.ASK_BEFORE_REGENERATE) {
+            String firstDetail = failureDetail(first);
+            new AlertDialog.Builder(this)
+                    .setTitle(WalletKeyRecovery.confirmTitle())
+                    .setMessage(WalletKeyRecovery.confirmBody())
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Create new key", (d, w) ->
+                            retryAfterRegeneration(nickname, name, network,
+                                    month, year, digits, firstDetail))
+                    .show();
+        } else {
+            showFullFailure("Couldn't save that card", failureDetail(first));
+        }
+    }
+
+    /** Regenerate the key once and retry the save once. Never
+     *  loops: one regeneration per save attempt, then the
+     *  failure stands — with BOTH attempts' text in the dialog
+     *  so the next report carries the full story. */
+    private void retryAfterRegeneration(String nickname, String name, String network,
+                                        int month, int year, String digits,
+                                        String firstDetail) {
+        try {
+            WalletStore.regenerateKey();
+        } catch (Exception regenFailed) {
+            showFullFailure("Couldn't save that card",
+                    "First attempt:\n" + firstDetail
+                    + "\n\nCreating a new key failed:\n"
+                    + failureDetail(regenFailed));
+            return;
+        }
+        try {
+            WalletStore.Card card = WalletStore.add(this, nickname, name, network,
+                    month, year, digits);
+            onCardAdded(card);
+        } catch (Exception second) {
+            showFullFailure("Couldn't save that card",
+                    "First attempt:\n" + firstDetail
+                    + "\n\nAfter creating a new key:\n" + failureDetail(second));
+        }
+    }
+
+    private void onCardAdded(WalletStore.Card card) {
+        OwnLog.log(this, "Wallet",
+                WalletCards.auditLine("added", card.nickname, card.last4));
+        refreshCards();
+    }
+
+    /** One failure's complete text: class + full message, plus
+     *  the cause's class + message when present (the cause
+     *  carries the last cipher attempt's uncapped words). */
+    private String failureDetail(Exception e) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(e.getClass().getSimpleName()).append(": ")
+                .append(String.valueOf(e.getMessage()));
+        Throwable cause = e.getCause();
+        if (cause != null && cause != e) {
+            sb.append("\nCaused by: ").append(cause.getClass().getSimpleName())
+                    .append(": ").append(String.valueOf(cause.getMessage()));
+        }
+        return sb.toString();
+    }
+
+    /** A save failure, shown in full: scrollable, selectable,
+     *  nothing truncated (v1.39, the v1.38 refusal-dialog
+     *  pattern). The per-attempt details must survive to the
+     *  next report. */
+    private void showFullFailure(String title, String body) {
+        Log.e("WalletActivity", title + ": " + body);
+        TextView text = new TextView(this);
+        text.setText(body);
+        text.setTextSize(14);
+        text.setTypeface(Typeface.MONOSPACE);
+        text.setTextColor(Ui.TEXT);
+        text.setTextIsSelectable(true);
+        int p = Ui.dp(this, 20);
+        text.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(text);
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(scroll)
+                .setPositiveButton("Close", null)
+                .show();
     }
 
     /** A vault failure, shown with its real cause: the exception's
@@ -542,7 +649,7 @@ public class WalletActivity extends ThemedActivity {
             payAppLine.setText("Pay app: " + apps.get(0).label);
             changePayAppButton.setVisibility(android.view.View.GONE);
         } else {
-            payAppLine.setText("Pay app: not chosen yet — you'll pick on first Pay.");
+            payAppLine.setText("Pay app: not chosen.");
             changePayAppButton.setVisibility(android.view.View.GONE);
         }
     }
@@ -613,8 +720,6 @@ public class WalletActivity extends ThemedActivity {
     private void showNoPayAppDialog() {
         new AlertDialog.Builder(this)
                 .setTitle("No wallet app installed")
-                .setMessage("Pay needs Google Pay or Samsung Wallet — the tap happens "
-                        + "there, not in Control. Install one of them to pay.")
                 .setPositiveButton("Get Google Pay", (d, which) -> openPlayStore(GOOGLE_PAY_PKG))
                 .setNeutralButton("Get Samsung Wallet", (d, which) -> openPlayStore(SAMSUNG_PAY_PKG))
                 .setNegativeButton("Cancel", null)

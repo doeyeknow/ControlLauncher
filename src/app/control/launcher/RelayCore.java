@@ -126,6 +126,17 @@ public final class RelayCore {
         return pr;
     }
 
+    /** §7.5 — propose learned words for the shared dictionary.
+     *  Returns the accepted count. Same signed-request path as
+     *  every other endpoint; the body is built by DictSubmit.
+     *  A 429 (daily word budget) or 401 (unregistered key)
+     *  arrives as a RelayException, like any other refusal. */
+    public int proposeWords(List<String> words) throws Exception {
+        Map<String, Object> res = call("POST", "/v1/dict/proposals",
+                DictSubmit.proposalBody(words));
+        return (int) RelayJson.lng(res, "accepted", 0);
+    }
+
     /** §7.4 — pull messages after a seq cursor. */
     public PullResult pullMessages(String channelId, long after, int limit)
             throws Exception {
@@ -149,7 +160,26 @@ public final class RelayCore {
 
     // ---- signed transport (§3) ----
 
-    private Map<String, Object> call(String method, String path, String bodyJson)
+    /** One signed request, with its outcome: HTTP status, parsed
+     *  body, and the round-trip time in milliseconds. Transport
+     *  failures (no connection, timeout, DNS) throw, as before;
+     *  an HTTP error status does NOT throw here — the caller
+     *  decides, so a probe can measure a completed round trip
+     *  even when the server refuses it. */
+    private static final class CallResult {
+        final int http;
+        final Map<String, Object> map;
+        final long elapsedMs;
+
+        CallResult(int http, Map<String, Object> map, long elapsedMs) {
+            this.http = http;
+            this.map = map;
+            this.elapsedMs = elapsedMs;
+        }
+    }
+
+    private CallResult callRaw(String method, String path, String bodyJson,
+                               int connectTimeoutMs, int readTimeoutMs)
             throws Exception {
         byte[] body = bodyJson == null ? new byte[0]
                 : bodyJson.getBytes(StandardCharsets.UTF_8);
@@ -160,11 +190,12 @@ public final class RelayCore {
                 payload.getBytes(StandardCharsets.UTF_8)));
         HttpURLConnection conn = (HttpURLConnection) new URL(BASE + path).openConnection();
         conn.setRequestMethod(method);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(20000);
+        conn.setConnectTimeout(connectTimeoutMs);
+        conn.setReadTimeout(readTimeoutMs);
         conn.setRequestProperty("x-relay-pubkey", pubB64);
         conn.setRequestProperty("x-relay-timestamp", ts);
         conn.setRequestProperty("x-relay-signature", sig);
+        long start = System.currentTimeMillis();
         if (bodyJson != null) {
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json");
@@ -175,20 +206,43 @@ public final class RelayCore {
         int http = conn.getResponseCode();
         String text = readAll(http >= 200 && http < 300
                 ? conn.getInputStream() : conn.getErrorStream());
+        long elapsedMs = System.currentTimeMillis() - start;
         Object parsed = null;
         try {
             parsed = RelayJson.parse(text);
         } catch (Exception ignored) {
         }
-        Map<String, Object> map = RelayJson.obj(parsed);
-        if (http < 200 || http >= 300) {
-            String code = RelayJson.str(map, "error");
-            String message = RelayJson.str(map, "message");
-            throw new RelayException(http,
-                    code.isEmpty() ? "http_" + http : code,
-                    message.isEmpty() ? ("Relay answered HTTP " + http) : message);
+        return new CallResult(http, RelayJson.obj(parsed), elapsedMs);
+    }
+
+    private Map<String, Object> call(String method, String path, String bodyJson)
+            throws Exception {
+        CallResult r = callRaw(method, path, bodyJson, 15000, 20000);
+        if (r.http < 200 || r.http >= 300) {
+            String code = RelayJson.str(r.map, "error");
+            String message = RelayJson.str(r.map, "message");
+            throw new RelayException(r.http,
+                    code.isEmpty() ? "http_" + r.http : code,
+                    message.isEmpty() ? ("Relay answered HTTP " + r.http) : message);
         }
-        return map;
+        return r.map;
+    }
+
+    /**
+     * The speed probe (v1.23): one signed GET to the read-only
+     * channel list, bounded to 5 seconds, returning the
+     * round-trip time in milliseconds. Nothing is posted, no
+     * user data leaves the phone beyond the signed identity
+     * header every relay call carries, and no state changes —
+     * the channel list is a read. Any completed HTTP round
+     * trip counts (even a refusal: the server answered, so the
+     * link is up); only a transport failure throws, and the
+     * caller reads that as "unreachable". The timeouts are
+     * tighter than the relay loop's on purpose: a probe that
+     * hangs for 35 seconds is not a measurement.
+     */
+    public long probeRoundTrip() throws Exception {
+        return callRaw("GET", "/v1/channels", null, 5000, 5000).elapsedMs;
     }
 
     private static String readAll(InputStream in) throws Exception {

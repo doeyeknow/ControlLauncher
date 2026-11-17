@@ -46,7 +46,7 @@ public final class AudioKeyAudio {
         private volatile int generation;
 
         /**
-         * Plays pcm (16 kHz mono PCM16) once, streaming (v1.9).
+         * Plays pcm (48 kHz mono PCM16 since v1.26) once, streaming (v1.9).
          *
          * v1.8 used MODE_STATIC with the whole frame in one buffer
          * and the track would not initialize on Adam's Galaxy A16
@@ -270,6 +270,12 @@ public final class AudioKeyAudio {
             void onLevel(double level);
             /** A frame decoded and CRC-verified. */
             void onFrame(byte[] payload);
+            /** The type tones were read, before the payload
+             *  finished arriving — the UI can name what is
+             *  coming. The kind is the AudioKeyPayload kind (or
+             *  an unknown value, which the UI names honestly
+             *  and the decoder later ignores). */
+            void onTypeHeard(int kind);
             /** A frame-shaped sound failed its CRC — keep listening. */
             void onCrcError();
             /** Recording could not start (e.g. no mic permission). */
@@ -287,8 +293,12 @@ public final class AudioKeyAudio {
             stop();
             stopped = false;
             decoder = new AudioModem.Decoder(new AudioModem.Decoder.Listener() {
-                @Override public void onFrame(byte[] payload) {
+                @Override public void onFrame(int type, byte[] payload) {
                     MAIN.post(() -> cb.onFrame(payload));
+                }
+
+                @Override public void onTypeHeard(int type) {
+                    MAIN.post(() -> cb.onTypeHeard(type));
                 }
 
                 @Override public void onCrcError() {

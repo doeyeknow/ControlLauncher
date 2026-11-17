@@ -3,9 +3,12 @@ package app.control.launcher;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
+import java.security.SecureRandom;
 import java.util.Arrays;
 
 /**
@@ -29,22 +32,50 @@ import java.util.Arrays;
  *      same SecretKey shape at runtime); random IVs; tampered
  *      ciphertext and wrong-key decryption fail instead of
  *      yielding wrong plaintext; short blobs rejected.
- *   6. CIPHER FALLBACK (v1.12): the shipping supplier list is
- *      default-first, keystore-second; a failing first supplier
- *      (lookup failure AND init failure) falls through to the
- *      next and the operation succeeds; a first success stops
- *      the attempts (the second supplier is never invoked); if
- *      every supplier fails, the thrown message names every
- *      attempt and fits the UI's ~160-char display. The v1.9.2
- *      premise (Keystore keys need the AndroidKeyStore provider)
- *      was wrong — Adam's A16 throws NoSuchAlgorithmException
- *      for that lookup — so the core now tries the full
- *      operation with each source in order instead of betting
- *      on one. The harness still cannot prove which source
- *      works with a real Keystore key on a real phone.
+ *   6. CIPHER FALLBACK (v1.12, extended v1.39): the shipping
+ *      supplier list is default-first, androidopenssl-second,
+ *      keystore-third; a failing first supplier (lookup failure
+ *      AND init failure) falls through to the next and the
+ *      operation succeeds; a first success stops the attempts
+ *      (later suppliers are never invoked); if every supplier
+ *      fails, the thrown AllFailedException's message names
+ *      every attempt in full (the old 160-char toast cap is
+ *      gone — the UI shows the complete text in a scrollable
+ *      dialog). The v1.9.2 premise (Keystore keys need the
+ *      AndroidKeyStore provider) was wrong — Adam's A16 throws
+ *      NoSuchAlgorithmException for that lookup — so the core
+ *      now tries the full operation with each source in order
+ *      instead of betting on one. The harness still cannot
+ *      prove which source works with a real Keystore key on a
+ *      real phone.
+ *   7. SUPPLIER ORDER (v1.39): each of the three positions can
+ *      win when the earlier ones fail, and the all-failed
+ *      exception carries the AllFailedException type the save
+ *      path keys regeneration on.
+ *   8. KEY RECOVERY (v1.39): the regeneration decision — silent
+ *      retry only for an all-cipher failure with a provably
+ *      empty vault; ask when cards exist or the count is
+ *      unknown; never twice, never for other failures, never
+ *      on the decrypt path (the rule's caller). The confirm
+ *      copy names the consequence plainly.
+ *   9. KEYSTORE-GENERATED IV (v1.40): encryption initializes
+ *      with NO parameters and reads the IV back via getIV()
+ *      (a Keystore key with randomized encryption required
+ *      refuses caller-provided IVs — Adam's v1.39 error proved
+ *      it). The no-IV-init path round-trips; the provider's
+ *      IVs differ between encryptions; the wire form still
+ *      starts with the 12-byte IV (tampering it breaks
+ *      decryption); a blob sealed the OLD way (caller-provided
+ *      IV) still decrypts, so the wire form is unchanged; and
+ *      the all-failed message still names all three attempts.
+ *      The harness proves this path with a JVM software key;
+ *      that a real Keystore key accepts no-parameter init is
+ *      proven on-device only.
  *
  * What this harness cannot prove: the Android Keystore key itself
- * (needs a device), the BiometricPrompt/device-credential gate
+ * (needs a device), key regeneration (delete + generate are
+ * Android-only — the decision rule is pinned here, the calls
+ * are proven on-device), the BiometricPrompt/device-credential gate
  * (needs a device), the Pay handoff (needs Google Pay / Samsung
  * Wallet installed), or anything on a real phone. The keystore
  * and credential code paths fail closed — a keystore error means
@@ -77,6 +108,18 @@ public final class WalletHarness {
         return new WalletCrypto.CipherSupplier() {
             @Override public String name() { return name; }
             @Override public Cipher get() throws Exception { throw toThrow; }
+        };
+    }
+
+    /** A supplier that returns a working GCM cipher under the
+     *  given name — stands in for a provider that resolves on a
+     *  device, so the order legs can pin which position wins. */
+    private static WalletCrypto.CipherSupplier working(final String name) {
+        return new WalletCrypto.CipherSupplier() {
+            @Override public String name() { return name; }
+            @Override public Cipher get() throws Exception {
+                return Cipher.getInstance("AES/GCM/NoPadding");
+            }
         };
     }
 
@@ -200,11 +243,12 @@ public final class WalletHarness {
         check("cipher: empty plaintext round-trips",
                 WalletCrypto.decrypt(key, WalletCrypto.encrypt(key, new byte[0])).length == 0, "");
 
-        // ---- 6. Cipher fallback (v1.12) ----
+        // ---- 6. Cipher fallback (v1.12, extended v1.39) ----
         WalletCrypto.CipherSupplier[] shipping = WalletCrypto.suppliers();
-        check("fallback: shipping list is default first, keystore second",
-                shipping.length == 2 && "default".equals(shipping[0].name())
-                        && "keystore".equals(shipping[1].name()), "");
+        check("fallback: shipping list is default, androidopenssl, keystore",
+                shipping.length == 3 && "default".equals(shipping[0].name())
+                        && "androidopenssl".equals(shipping[1].name())
+                        && "keystore".equals(shipping[2].name()), "");
         // A supplier that fails exactly the way Adam's A16 fails
         // the AndroidKeyStore lookup: provider present, Cipher
         // lookup not exposed.
@@ -232,12 +276,12 @@ public final class WalletHarness {
         check("fallback: init failure falls through, encrypt succeeds",
                 Arrays.equals(plain, WalletCrypto.decrypt(key,
                         WalletCrypto.encrypt(key, plain, initFails))), "");
-        // A first success stops the attempts: the second supplier
-        // is never invoked (on the JVM the default supplier wins,
-        // so the keystore lookup never runs).
-        final int[] calls = new int[2];
-        WalletCrypto.CipherSupplier[] counting = new WalletCrypto.CipherSupplier[2];
-        for (int i = 0; i < 2; i++) {
+        // A first success stops the attempts: the later suppliers
+        // are never invoked (on the JVM the default supplier wins,
+        // so the other lookups never run).
+        final int[] calls = new int[3];
+        WalletCrypto.CipherSupplier[] counting = new WalletCrypto.CipherSupplier[3];
+        for (int i = 0; i < 3; i++) {
             final int idx = i;
             final WalletCrypto.CipherSupplier inner = shipping[i];
             counting[i] = new WalletCrypto.CipherSupplier() {
@@ -250,39 +294,56 @@ public final class WalletHarness {
         }
         WalletCrypto.encrypt(key, plain, counting);
         check("fallback: first success stops the attempts",
-                calls[0] == 1 && calls[1] == 0, "calls=" + calls[0] + "," + calls[1]);
-        // All suppliers fail: the message names EVERY attempt and
-        // fits the UI display cap, for both encrypt and decrypt.
+                calls[0] == 1 && calls[1] == 0 && calls[2] == 0,
+                "calls=" + calls[0] + "," + calls[1] + "," + calls[2]);
+        // All suppliers fail: the message names EVERY attempt in
+        // full, for both encrypt and decrypt — and the exception
+        // carries the type the save path keys regeneration on.
+        String longDetail = "abcdefghijklmnopqrstuvwxyz0123456789"
+                + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij";
         WalletCrypto.CipherSupplier failDefault = failing("default",
-                new NoSuchAlgorithmException("No such algorithm: AES/GCM/NoPadding"));
+                new NoSuchAlgorithmException(longDetail));
+        WalletCrypto.CipherSupplier failOpenssl = failing("androidopenssl",
+                new InvalidKeyException("openssl provider rejected the key"));
         WalletCrypto.CipherSupplier failKeystore = failing("keystore",
                 new InvalidKeyException("keystore key rejected by this provider"));
         WalletCrypto.CipherSupplier[] allFail =
-                new WalletCrypto.CipherSupplier[] { failDefault, failKeystore };
+                new WalletCrypto.CipherSupplier[] { failDefault, failOpenssl, failKeystore };
         String encMsg = null;
+        boolean encTyped = false;
         try {
             WalletCrypto.encrypt(key, plain, allFail);
         } catch (Exception e) {
             encMsg = e.getMessage();
+            encTyped = e instanceof WalletCrypto.AllFailedException;
         }
         check("all-fail: encrypt names every attempt",
                 encMsg != null && encMsg.startsWith("No cipher worked: ")
                         && encMsg.contains("default=NoSuchAlgorithmException")
+                        && encMsg.contains("androidopenssl=InvalidKeyException")
                         && encMsg.contains("keystore=InvalidKeyException"),
                 String.valueOf(encMsg));
-        check("all-fail: encrypt message fits the UI cap",
-                encMsg != null && encMsg.length() <= 160,
+        check("all-fail: encrypt detail survives in full",
+                encMsg != null && encMsg.contains(longDetail),
+                String.valueOf(encMsg));
+        check("all-fail: encrypt message stays within the safety bound",
+                encMsg != null && encMsg.length() <= 2000,
                 "len=" + (encMsg == null ? "null" : encMsg.length()));
+        check("all-fail: encrypt throws AllFailedException", encTyped, "");
         String decMsg = null;
+        boolean decTyped = false;
         try {
             WalletCrypto.decrypt(key, blob, allFail);
         } catch (Exception e) {
             decMsg = e.getMessage();
+            decTyped = e instanceof WalletCrypto.AllFailedException;
         }
         check("all-fail: decrypt names every attempt",
                 decMsg != null && decMsg.contains("default=NoSuchAlgorithmException")
+                        && decMsg.contains("androidopenssl=InvalidKeyException")
                         && decMsg.contains("keystore=InvalidKeyException"),
                 String.valueOf(decMsg));
+        check("all-fail: decrypt throws AllFailedException", decTyped, "");
         // A failure with no message still yields a readable entry.
         WalletCrypto.CipherSupplier noMessage = failing("default", new InvalidKeyException());
         String nullMsg = null;
@@ -296,20 +357,133 @@ public final class WalletHarness {
                 "No cipher worked: default=InvalidKeyException".equals(nullMsg),
                 String.valueOf(nullMsg));
         // A tampered blob fails under the default supplier at
-        // doFinal and under the keystore supplier at lookup (on
-        // the JVM the provider does not exist), so the composite
-        // message names both attempts — and still throws instead
-        // of yielding wrong plaintext.
+        // doFinal and under the other two suppliers at lookup
+        // (on the JVM the providers do not exist), so the
+        // composite message names all three attempts — and still
+        // throws instead of yielding wrong plaintext.
         String tamperMsg = null;
         try {
             WalletCrypto.decrypt(key, tampered);
         } catch (Exception e) {
             tamperMsg = e.getMessage();
         }
-        check("all-fail: tampered blob names both attempts",
+        check("all-fail: tampered blob names all three attempts",
                 tamperMsg != null && tamperMsg.contains("default=AEADBadTagException")
+                        && tamperMsg.contains("androidopenssl=NoSuchProviderException")
                         && tamperMsg.contains("keystore=NoSuchProviderException"),
                 String.valueOf(tamperMsg));
+
+        // ---- 7. Supplier order (v1.39) ----
+        // Each position can win when the earlier ones fail: the
+        // middle supplier wins here (named androidopenssl, backed
+        // by a working cipher), and the third wins when both
+        // earlier ones fail.
+        WalletCrypto.CipherSupplier[] middleWins = new WalletCrypto.CipherSupplier[] {
+                failing("default", new NoSuchAlgorithmException("no default")),
+                working("androidopenssl"),
+                failing("keystore", new NoSuchProviderException("no keystore")) };
+        byte[] middleBlob = WalletCrypto.encrypt(key, plain, middleWins);
+        check("order: middle supplier wins when the first fails",
+                middleBlob != null && middleBlob.length > 12, "");
+        WalletCrypto.CipherSupplier[] lastWins = new WalletCrypto.CipherSupplier[] {
+                failing("default", new NoSuchAlgorithmException("no default")),
+                failing("androidopenssl", new NoSuchProviderException("no openssl")),
+                working("keystore") };
+        byte[] lastBlob = WalletCrypto.encrypt(key, plain, lastWins);
+        check("order: last supplier wins when the first two fail",
+                lastBlob != null && lastBlob.length > 12, "");
+        // A blob sealed through a later supplier still decrypts
+        // through the shipping list (the wire form is unchanged).
+        check("order: blob sealed by a later supplier decrypts",
+                Arrays.equals(WalletCrypto.decrypt(key, middleBlob, shipping), plain), "");
+
+        // ---- 8. Key recovery decision (v1.39) ----
+        check("recovery: no failure means no regeneration",
+                WalletKeyRecovery.decide(false, 0, false)
+                        == WalletKeyRecovery.Action.GIVE_UP, "");
+        check("recovery: all-fail + empty vault regenerates silently",
+                WalletKeyRecovery.decide(true, 0, false)
+                        == WalletKeyRecovery.Action.REGENERATE_SILENTLY, "");
+        check("recovery: all-fail + one card asks first",
+                WalletKeyRecovery.decide(true, 1, false)
+                        == WalletKeyRecovery.Action.ASK_BEFORE_REGENERATE, "");
+        check("recovery: all-fail + many cards asks first",
+                WalletKeyRecovery.decide(true, 5, false)
+                        == WalletKeyRecovery.Action.ASK_BEFORE_REGENERATE, "");
+        check("recovery: all-fail + unknown count asks first (fail closed)",
+                WalletKeyRecovery.decide(true, null, false)
+                        == WalletKeyRecovery.Action.ASK_BEFORE_REGENERATE, "");
+        check("recovery: already regenerated means give up",
+                WalletKeyRecovery.decide(true, 0, true)
+                        == WalletKeyRecovery.Action.GIVE_UP, "");
+        check("recovery: already regenerated + cards means give up",
+                WalletKeyRecovery.decide(true, 3, true)
+                        == WalletKeyRecovery.Action.GIVE_UP, "");
+        check("recovery: confirm copy names the consequence",
+                WalletKeyRecovery.confirmBody().contains(
+                        "previously saved cards will stop opening")
+                        && WalletKeyRecovery.confirmBody().contains("re-added"),
+                WalletKeyRecovery.confirmBody());
+        check("recovery: confirm title names the key",
+                WalletKeyRecovery.confirmTitle().contains("encryption key"),
+                WalletKeyRecovery.confirmTitle());
+
+        // ---- 9. Keystore-generated IV (v1.40) ----
+        // (a) The no-IV-init encrypt path round-trips through
+        // the shipping decrypt, default supplier only.
+        WalletCrypto.CipherSupplier[] defaultOnly =
+                new WalletCrypto.CipherSupplier[] { shipping[0] };
+        check("keystore-iv: no-IV-init encrypt round-trips",
+                Arrays.equals(plain, WalletCrypto.decrypt(key,
+                        WalletCrypto.encrypt(key, plain, defaultOnly))), "");
+        // (b) getIV() yields a fresh random 12-byte IV per
+        // encryption: the two blobs' IV prefixes differ, and
+        // both blobs decrypt.
+        byte[] ivA = Arrays.copyOfRange(blob, 0, 12);
+        byte[] ivB = Arrays.copyOfRange(blob2, 0, 12);
+        check("keystore-iv: provider IVs differ between encryptions",
+                !Arrays.equals(ivA, ivB), "");
+        check("keystore-iv: IV prefix is exactly 12 bytes",
+                ivA.length == 12 && ivB.length == 12, "");
+        // (c) The wire form still starts with the IV: tampering
+        // the IV prefix breaks decryption (the stored IV is the
+        // one decrypt uses), and the blob length is unchanged.
+        byte[] ivTampered = blob.clone();
+        ivTampered[0] ^= 0x01;
+        boolean ivTamperFailed = false;
+        try {
+            WalletCrypto.decrypt(key, ivTampered);
+        } catch (Exception e) {
+            ivTamperFailed = true;
+        }
+        check("keystore-iv: tampered IV prefix rejected", ivTamperFailed, "");
+        // A blob sealed the OLD way (caller-provided IV, as
+        // every version through v1.39 wrote it) still decrypts
+        // through the unchanged decrypt path — the wire form
+        // IV‖ciphertext+tag is identical.
+        byte[] oldIv = new byte[12];
+        new SecureRandom().nextBytes(oldIv);
+        Cipher legacy = Cipher.getInstance("AES/GCM/NoPadding");
+        legacy.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, oldIv));
+        byte[] legacyCt = legacy.doFinal(plain);
+        byte[] legacyBlob = new byte[12 + legacyCt.length];
+        System.arraycopy(oldIv, 0, legacyBlob, 0, 12);
+        System.arraycopy(legacyCt, 0, legacyBlob, 12, legacyCt.length);
+        check("keystore-iv: blob sealed the old way still decrypts",
+                Arrays.equals(plain, WalletCrypto.decrypt(key, legacyBlob)), "");
+        // (d) Under the new encryptOnce, an all-failed encrypt
+        // still names all three attempts.
+        String ivFailMsg = null;
+        try {
+            WalletCrypto.encrypt(key, plain, allFail);
+        } catch (Exception e) {
+            ivFailMsg = e.getMessage();
+        }
+        check("keystore-iv: all-fail message still names all three attempts",
+                ivFailMsg != null && ivFailMsg.contains("default=")
+                        && ivFailMsg.contains("androidopenssl=")
+                        && ivFailMsg.contains("keystore="),
+                String.valueOf(ivFailMsg));
 
         System.out.println("----");
         System.out.println(passed + " passed, " + failed + " failed");

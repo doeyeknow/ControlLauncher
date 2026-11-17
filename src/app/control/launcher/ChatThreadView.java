@@ -13,6 +13,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -58,6 +59,18 @@ public class ChatThreadView extends LinearLayout {
         String cmid = "";
         boolean mine;
         boolean undecryptable;
+        /** v1.28: non-null when the text arrived word-coded
+         *  with a dictionary this build cannot decode. */
+        String wordNote;
+        /** v1.32: the wire form exactly as sent/received —
+         *  null when unrecorded (a message this build never
+         *  saw the plaintext of). Never a re-encode. */
+        String wire;
+        /** v1.32: the original text's byte count (-1 when
+         *  unknown, i.e. an undecoded payload). */
+        int plainBytes = -1;
+        /** v1.32: whether the payload arrived coded. */
+        boolean coded;
     }
 
     private final Activity act;
@@ -123,6 +136,12 @@ public class ChatThreadView extends LinearLayout {
         list.setDivider(null);
         adapter = new MsgAdapter();
         list.setAdapter(adapter);
+        // v1.32: long-press a message to view the encoded
+        // form that actually went over the wire.
+        list.setOnItemLongClickListener((p, v, pos, id) -> {
+            showMessageMenu(v, messages.get(pos));
+            return true;
+        });
         addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -277,21 +296,35 @@ public class ChatThreadView extends LinearLayout {
             msg.mine = myPub.equals(m.sender);
             msg.cmid = m.clientMsgId;
             msg.senderName = msg.mine ? "You" : ContactCard.senderName(act, m.sender);
-            if (channelKey == null) {
-                // Open/unkeyed: the blob is the plaintext itself.
-                try {
-                    msg.text = new String(RelayKeys.b64StdDecode(m.ciphertext),
-                            StandardCharsets.UTF_8);
-                } catch (Exception e) {
-                    msg.undecryptable = true;
-                }
-            } else {
-                try {
-                    byte[] plain = RelayCrypto.open(channelKey, m.ciphertext);
-                    msg.text = unwrap(new String(plain, StandardCharsets.UTF_8));
-                } catch (Exception e) {
-                    msg.undecryptable = true;
-                }
+            try {
+                String plain = channelKey == null
+                        // Open/unkeyed: the blob is the plaintext itself.
+                        ? new String(RelayKeys.b64StdDecode(m.ciphertext),
+                                StandardCharsets.UTF_8)
+                        : new String(RelayCrypto.open(channelKey, m.ciphertext),
+                                StandardCharsets.UTF_8);
+                // v1.28: both branches unwrap, so a word-coded
+                // message decodes on an unkeyed channel exactly
+                // as on a keyed one. Side effect, and an
+                // improvement: a plain envelope on an unkeyed
+                // channel now shows its text, not its JSON.
+                ChatEnvelope.Unwrapped u = ChatEnvelope.unwrap(plain);
+                msg.text = u.text;
+                msg.wordNote = u.wordNote;
+                // v1.32: the wire form as received, never a
+                // re-encode; an undecoded payload's original
+                // size is unknown.
+                msg.wire = u.wire;
+                msg.coded = u.coded;
+                msg.plainBytes = u.wordNote != null ? -1
+                        : u.text.getBytes(StandardCharsets.UTF_8).length;
+                // v1.29: clean decodes teach the table their
+                // new words, and adopted teach-block codes
+                // mark this conversation taught.
+                DictStore.noteReceived(channelId,
+                        new WordDict.Result(u.text, u.wordNote, u.adopted));
+            } catch (Exception e) {
+                msg.undecryptable = true;
             }
             if (msg.undecryptable) {
                 msg.text = "Sealed message — can't open it with this "
@@ -303,16 +336,19 @@ public class ChatThreadView extends LinearLayout {
         return added;
     }
 
-    /** Chat plaintext is the §6 JSON envelope when it parses as one. */
-    private static String unwrap(String plain) {
-        try {
-            JSONObject o = new JSONObject(plain);
-            if ("text".equals(o.optString("type"))) {
-                return o.optString("text", "");
-            }
-        } catch (Exception ignored) {
-        }
-        return plain;
+    /** The long-press menu for one message (v1.32): the
+     *  encoded view shows the recorded wire form, never a
+     *  re-encode. An undecryptable message has no recorded
+     *  form — the dialog says so honestly. */
+    private void showMessageMenu(View anchor, Msg m) {
+        PopupMenu menu = new PopupMenu(act, anchor);
+        menu.getMenu().add("View encoded message");
+        menu.setOnMenuItemClickListener(item -> {
+            EncodedMessageDialog.show(act, m.wire, m.plainBytes, m.coded,
+                    m.wordNote, m.text, null);
+            return true;
+        });
+        menu.show();
     }
 
     // ---- send ----
@@ -324,21 +360,19 @@ public class ChatThreadView extends LinearLayout {
         local.senderName = "You";
         local.text = text;
         local.cmid = cmid;
+        // v1.32: the envelope builder returns the exact wire
+        // form, recorded here so the long-press view shows
+        // what was actually sent, never a re-encode.
+        ChatEnvelope.Built built = ChatEnvelope.build(text, channelId);
+        local.wire = built.wire;
+        local.coded = built.coded;
+        local.plainBytes = text.getBytes(StandardCharsets.UTF_8).length;
         messages.add(local);
         seenCmids.add(cmid);
         adapter.notifyDataSetChanged();
         list.setSelection(messages.size() - 1);
 
-        String envelope;
-        try {
-            JSONObject o = new JSONObject();
-            o.put("type", "text");
-            o.put("text", text);
-            o.put("ts", System.currentTimeMillis());
-            envelope = o.toString();
-        } catch (Exception e) {
-            envelope = text;
-        }
+        String envelope = built.envelope;
         byte[] plain = envelope.getBytes(StandardCharsets.UTF_8);
         final String blob = channelKey != null
                 ? RelayCrypto.seal(channelKey, plain)
@@ -389,6 +423,11 @@ public class ChatThreadView extends LinearLayout {
             TextView body = Ui.text(act, m.text, 16,
                     m.undecryptable ? Ui.SIGNAL : Ui.TEXT);
             row.addView(body);
+            // v1.28: an undecodable word-coded text names why
+            // it shows as sent, under the text itself.
+            if (m.wordNote != null && !m.wordNote.isEmpty()) {
+                row.addView(Ui.text(act, m.wordNote, 11, Ui.SIGNAL));
+            }
             return row;
         }
     }

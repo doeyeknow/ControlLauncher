@@ -309,6 +309,14 @@ public class BridgeWatchdogService extends Service {
                 lastBridgeVersion = after.bridgeVersion;
                 lastBridgeState = BridgeGate.classify(
                         after.ok, after.bridgeVersion);
+                // The restart killed any hold watch (its socket
+                // died with the old bridge), and the ring
+                // service stops itself when its watch ends — so
+                // re-enforce the ring gates now that the bridge
+                // is back, or the hold-anywhere menu stays dead
+                // over other apps until Settings or Deep view
+                // is opened (v1.43).
+                OverlayRingService.reconcile(this);
                 nextDelay = WatchdogPolicy.PING_INTERVAL_MS;
             } else {
                 consecutiveFailures++;

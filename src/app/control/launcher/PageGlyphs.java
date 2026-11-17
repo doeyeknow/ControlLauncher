@@ -31,6 +31,7 @@ final class PageGlyphs {
     static final int CLOCK = 12;
     static final int INFO = 13;
     static final int WALLET = 14;
+    static final int CAMERA = 15;
 
     private PageGlyphs() {}
 
@@ -213,6 +214,23 @@ final class PageGlyphs {
                 Paint.Style old = paint.getStyle();
                 paint.setStyle(Paint.Style.FILL);
                 canvas.drawCircle(x(l, size, .72f), y(t, size, .60f), size * .05f, paint);
+                paint.setStyle(old);
+                break;
+            }
+            case CAMERA: {
+                // camera body, viewfinder bump, lens circle
+                RectF body = new RectF(x(l, size, .10f), y(t, size, .30f),
+                        x(l, size, .90f), y(t, size, .86f));
+                canvas.drawRoundRect(body, size * .08f, size * .08f, paint);
+                p.moveTo(x(l, size, .34f), y(t, size, .30f));
+                p.lineTo(x(l, size, .38f), y(t, size, .16f));
+                p.lineTo(x(l, size, .62f), y(t, size, .16f));
+                p.lineTo(x(l, size, .66f), y(t, size, .30f));
+                canvas.drawPath(p, paint);
+                canvas.drawCircle(cx, y(t, size, .58f), size * .16f, paint);
+                Paint.Style old = paint.getStyle();
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawCircle(x(l, size, .78f), y(t, size, .42f), size * .04f, paint);
                 paint.setStyle(old);
                 break;
             }

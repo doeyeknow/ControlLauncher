@@ -22,6 +22,22 @@ import java.util.Base64;
  *   kind 2, channel invite: [number:1][mode:1][labelLen:1][label]
  *       [key:32, private only — open channels carry no key]
  *   kind 3, chat key: [nameLen:1][name][key:32]
+ *   kind 4, mesh join (v1.26): [road:1][hostLen:1][host]
+ *       [addrLen:1][addr][idLen:1][channelId][nameLen:1]
+ *       [channelName][keyed:1] — join instructions telling the
+ *       receiver which mesh to connect to and how: road 1 is
+ *       Wi-Fi Direct (addr = the host's device address) and
+ *       road 2 is LAN (addr = the host's IPv4 address). The
+ *       channel identity names the slot to tune; keyed says
+ *       whether that channel needs a key the receiver must
+ *       already hold (from a channel invite). Field caps are
+ *       smaller here (32/24 bytes) so the whole packet stays
+ *       far under the modem's 200-byte cap.
+ *
+ * The kind byte is also announced in tones before the payload
+ * (see AudioModem): the registry below is the single list of
+ * known kinds, and anything outside it is ignored, never
+ * misrouted.
  *
  * Pure Java with no Android or org.json dependency, so the JVM
  * harness exercises this exact code; the JSON text is built by hand
@@ -32,9 +48,24 @@ public final class AudioKeyPayload {
     public static final int KIND_CONTACT = 1;
     public static final int KIND_CHANNEL = 2;
     public static final int KIND_CHAT = 3;
+    public static final int KIND_MESH = 4;
+
+    /** Mesh-join roads. */
+    public static final int ROAD_P2P = 1; // Wi-Fi Direct group
+    public static final int ROAD_LAN = 2; // same Wi-Fi network
 
     /** Longest name/label carried over the air, in UTF-8 bytes. */
     public static final int MAX_TEXT = 64;
+    /** Mesh-join field caps, in UTF-8 bytes (see the layout above). */
+    public static final int MAX_MESH_TEXT = 32;
+    public static final int MAX_MESH_ADDR = 24;
+
+    /** The type registry: kinds this build knows how to route.
+     *  Anything else is ignored, never misrouted. */
+    public static boolean isKnownKind(int kind) {
+        return kind == KIND_CONTACT || kind == KIND_CHANNEL
+                || kind == KIND_CHAT || kind == KIND_MESH;
+    }
 
     private AudioKeyPayload() {}
 
@@ -47,16 +78,26 @@ public final class AudioKeyPayload {
         public boolean priv;       // channel: private mode
         public String label = "";  // channel label
         public byte[] key;         // channel (private) / chat key, 32 bytes
+        public int road;           // mesh: ROAD_P2P or ROAD_LAN
+        public String hostName = "";   // mesh: hosting phone's name
+        public String address = "";    // mesh: device address (p2p) or IPv4 (LAN)
+        public String channelId = "";  // mesh: slot identity to tune
+        public String channelName = ""; // mesh: channel display name
+        public boolean keyed;      // mesh: the channel needs a key
     }
 
     // ---- encode ----
 
     private static byte[] textBytes(String s) {
+        return textBytes(s, MAX_TEXT);
+    }
+
+    private static byte[] textBytes(String s, int cap) {
         if (s == null) s = "";
         byte[] raw = s.getBytes(StandardCharsets.UTF_8);
-        if (raw.length <= MAX_TEXT) return raw;
+        if (raw.length <= cap) return raw;
         // Truncate at a UTF-8 character boundary.
-        int cut = MAX_TEXT;
+        int cut = cap;
         while (cut > 0 && (raw[cut] & 0xC0) == 0x80) cut--;
         byte[] out = new byte[cut];
         System.arraycopy(raw, 0, out, 0, cut);
@@ -138,6 +179,41 @@ public final class AudioKeyPayload {
         return out;
     }
 
+    /** Mesh join: instructions for the receiving launcher to
+     *  connect to the sender's mesh. Null on a bad road, an empty
+     *  address, or an empty channel identity — a join packet that
+     *  cannot name its destination is never sent. */
+    public static byte[] mesh(int road, String hostName, String address,
+                              String channelId, String channelName, boolean keyed) {
+        if (road != ROAD_P2P && road != ROAD_LAN) return null;
+        if (address == null || address.trim().isEmpty()) return null;
+        if (channelId == null || channelId.trim().isEmpty()) return null;
+        byte[] hostBytes = textBytes(hostName, MAX_MESH_TEXT);
+        byte[] addrBytes = textBytes(address.trim(), MAX_MESH_ADDR);
+        byte[] idBytes = textBytes(channelId.trim(), MAX_MESH_TEXT);
+        byte[] nameBytes = textBytes(channelName, MAX_MESH_TEXT);
+        if (addrBytes.length == 0 || idBytes.length == 0) return null;
+        byte[] out = new byte[1 + 1 + 1 + hostBytes.length + 1 + addrBytes.length
+                + 1 + idBytes.length + 1 + nameBytes.length + 1];
+        int p = 0;
+        out[p++] = KIND_MESH;
+        out[p++] = (byte) road;
+        out[p++] = (byte) hostBytes.length;
+        System.arraycopy(hostBytes, 0, out, p, hostBytes.length);
+        p += hostBytes.length;
+        out[p++] = (byte) addrBytes.length;
+        System.arraycopy(addrBytes, 0, out, p, addrBytes.length);
+        p += addrBytes.length;
+        out[p++] = (byte) idBytes.length;
+        System.arraycopy(idBytes, 0, out, p, idBytes.length);
+        p += idBytes.length;
+        out[p++] = (byte) nameBytes.length;
+        System.arraycopy(nameBytes, 0, out, p, nameBytes.length);
+        p += nameBytes.length;
+        out[p++] = (byte) (keyed ? 1 : 0);
+        return out;
+    }
+
     // ---- decode ----
 
     /** Parses an air payload; null when it is not a well-formed key
@@ -179,6 +255,29 @@ public final class AudioKeyPayload {
                 d.name = new String(payload, p, n, StandardCharsets.UTF_8);
                 p += n;
                 d.key = copy(payload, p, 32);
+                return d;
+            }
+            if (kind == KIND_MESH) {
+                if (payload.length < 6) return null;
+                d.road = payload[p++] & 0xFF;
+                if (d.road != ROAD_P2P && d.road != ROAD_LAN) return null;
+                int hn = payload[p++] & 0xFF;
+                if (hn > MAX_MESH_TEXT || p + hn + 1 > payload.length) return null;
+                d.hostName = new String(payload, p, hn, StandardCharsets.UTF_8);
+                p += hn;
+                int an = payload[p++] & 0xFF;
+                if (an == 0 || an > MAX_MESH_ADDR || p + an + 1 > payload.length) return null;
+                d.address = new String(payload, p, an, StandardCharsets.UTF_8);
+                p += an;
+                int idn = payload[p++] & 0xFF;
+                if (idn == 0 || idn > MAX_MESH_TEXT || p + idn + 1 > payload.length) return null;
+                d.channelId = new String(payload, p, idn, StandardCharsets.UTF_8);
+                p += idn;
+                int nn = payload[p++] & 0xFF;
+                if (nn > MAX_MESH_TEXT || p + nn + 1 != payload.length) return null;
+                d.channelName = new String(payload, p, nn, StandardCharsets.UTF_8);
+                p += nn;
+                d.keyed = (payload[p] & 0xFF) == 1;
                 return d;
             }
             return null;
@@ -242,17 +341,28 @@ public final class AudioKeyPayload {
             return "{\"app\":\"control-chat\",\"v\":1,\"name\":\"" + esc(d.name)
                     + "\",\"key\":\"" + b64Std(d.key) + "\"}";
         }
+        if (d.kind == KIND_MESH) {
+            return "{\"app\":\"control-mesh-join\",\"v\":1,\"road\":\""
+                    + (d.road == ROAD_LAN ? "lan" : "p2p")
+                    + "\",\"host\":\"" + esc(d.hostName)
+                    + "\",\"address\":\"" + esc(d.address)
+                    + "\",\"channelId\":\"" + esc(d.channelId)
+                    + "\",\"channelName\":\"" + esc(d.channelName)
+                    + "\",\"keyed\":" + d.keyed + "}";
+        }
         return "";
     }
 
     /** Human kind name for status copy ("contact card", "channel
-     *  invite", "chat key"). */
+     *  invite", "chat key", "mesh invite"). Unknown kinds name
+     *  themselves as unknown — never a guess. */
     public static String kindName(int kind) {
         switch (kind) {
             case KIND_CONTACT: return "contact card";
             case KIND_CHANNEL: return "channel invite";
             case KIND_CHAT: return "chat key";
-            default: return "key";
+            case KIND_MESH: return "mesh invite";
+            default: return "a type this version doesn't know";
         }
     }
 }

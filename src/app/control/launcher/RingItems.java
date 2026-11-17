@@ -94,6 +94,7 @@ public final class RingItems {
         public static final int OPEN_CONVO = 4;       // text = channelId
         public static final int HOME_ROLE = 5;        // no payload
         public static final int NOTIF_SETTINGS = 6;   // no payload
+        public static final int OPEN_CAMERA = 7;      // text = camera id
 
         public final int kind;
         public final String text;
@@ -133,6 +134,10 @@ public final class RingItems {
 
         public static Action notifSettings() {
             return new Action(NOTIF_SETTINGS, null, 0, null);
+        }
+
+        public static Action openCamera(String cameraId) {
+            return new Action(OPEN_CAMERA, cameraId, 0, null);
         }
     }
 

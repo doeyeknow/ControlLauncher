@@ -47,8 +47,26 @@ public class MeshNet {
     public interface Listener {
         void onState(String state);
         void onMembers(List<String> names);
-        void onTalker(String name);       // null = floor free
-        void onText(String from, String text, boolean lowData);
+        /** null name = floor free. meta is the bridging
+         *  provenance (v1.24) when the spurt arrived relayed
+         *  through a gateway, null for a direct spurt; mid
+         *  is the spurt's sender-minted message id ("" when
+         *  the sender predates it). */
+        void onTalker(String name, BridgeRule.Relayed meta, String mid);
+        /** meta is the bridging provenance (v1.24) when the
+         *  text arrived relayed through a gateway, null for
+         *  a direct text; mid is the text's sender-minted
+         *  message id ("" when the sender predates it).
+         *  wordNote (v1.28) is non-null when the text arrived
+         *  word-coded with a dictionary this build cannot
+         *  decode: the text is then the raw coded payload,
+         *  shown as sent, and the note says why. wire
+         *  (v1.32) is the payload exactly as received and
+         *  coded says whether it arrived coded — the
+         *  long-press view shows the real wire form. */
+        void onText(String from, String text, boolean lowData,
+                    BridgeRule.Relayed meta, String mid, String wordNote,
+                    String wire, boolean coded);
         void onVoice(byte[] pcm);         // a decoded chunk to play
         void onSpurtEnd();                // play the roger beep
         void onChannel(String channelId, String channelName); // from the host's welcome
@@ -151,9 +169,33 @@ public class MeshNet {
 
     // ---- talking ----
 
-    /** Sends spurt-start, then frames via sendVoice, then spurt-end. */
-    public void beginSpurt() {
-        broadcastOrSend(new Packet('S', jsonName()));
+    /** Sends spurt-start, then frames via sendVoice, then spurt-end.
+     *  mid is the spurt's message id, minted by the caller:
+     *  it is the origin identity gateways derive the bridge
+     *  id from (v1.24), and the caller's own relay post uses
+     *  the same id, so a gatewayed copy dedups against the
+     *  originator's own post instead of doubling it. An empty
+     *  mid is minted here, defensively — the packet always
+     *  carries one. */
+    public void beginSpurt(String mid) {
+        broadcastOrSend(new Packet('S', jsonName(mid)));
+    }
+
+    /** Spurt-start for a BRIDGED burst (v1.24): the packet
+     *  names the ORIGINAL sender and carries the bridging
+     *  provenance, so receivers show who really spoke and
+     *  the loop rules can follow the message. Old receivers
+     *  read only the name and ignore the extra keys. */
+    public void beginSpurtAs(String name, BridgeRule.Relayed meta) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("name", name);
+            o.put("channel", channelId);
+            BridgeRule.putRelayKeys(o, meta);
+            broadcastOrSend(new Packet('S',
+                    o.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception ignored) {
+        }
     }
 
     public void sendVoice(byte[] pcm) {
@@ -169,33 +211,90 @@ public class MeshNet {
         broadcastOrSend(new Packet('E', new byte[0]));
     }
 
-    public void sendText(String text) {
-        sendText(text, false);
+    public SentText sendText(String text) {
+        return sendText(text, false);
     }
 
-    /** v1.11: low-data texts carry an "ld" flag in the 'T' packet so
-     *  the receiver knows to read them aloud. Old receivers ignore
-     *  the unknown key and show the text as usual; the flag is
-     *  omitted for ordinary texts, so those packets are unchanged.
-     *  The host relays 'T' packets verbatim, so the flag rides
-     *  along untouched. */
-    public void sendText(String text, boolean lowData) {
+    /** v1.11: low-data texts carry an "ld" flag in the text
+     *  packet so the receiver knows to read them aloud. Old
+     *  receivers ignore the unknown key and show the text
+     *  as usual; the flag is omitted for ordinary texts.
+     *  The host relays text packets verbatim, so the flag
+     *  rides along untouched. */
+    /** Sends a text, returning what was actually put on the
+     *  wire (v1.24/v1.32): the message id minted for it —
+     *  the caller stamps the matching thread entry with the
+     *  derived bridge id, so a gatewayed copy of its own
+     *  text dedups instead of landing twice — plus the
+     *  exact coded wire form, so the entry records the real
+     *  coded form for the long-press view. */
+    /** Puts the text into a 'D' packet, word-coded on the
+     *  "w" key with no marker (v1.32: every message coded,
+     *  the packet type is the self-identifying shape). The
+     *  returned wire form is the exact payload sent. */
+    static String putText(JSONObject o, String text) throws Exception {
+        return putText(o, text, null);
+    }
+
+    /** Scope-aware (v1.29): the teach block rides as "wdt"
+     *  when the scope has words to learn. A null scope
+     *  means no teaching (base codes only). */
+    static String putText(JSONObject o, String text, String scope) throws Exception {
+        WordDict.Encoded e = DictStore.encodeForScope(scope, text);
+        String wire = e == null
+                ? WordDict.escapeOnly(text == null ? "" : text) : e.wire;
+        o.put("w", wire);
+        if (e != null && e.teach != null && !e.teach.isEmpty()) {
+            o.put("wdt", e.teach);
+        }
+        return wire;
+    }
+
+    public SentText sendText(String text, boolean lowData) {
+        String mid = java.util.UUID.randomUUID().toString();
+        String wire = "";
         try {
             JSONObject o = new JSONObject();
             o.put("from", myName);
-            o.put("text", text);
+            wire = putText(o, text, channelId);
+            o.put("channel", channelId);
+            // v1.24: the message id is the origin identity
+            // gateways derive the bridge id from. Old
+            // receivers ignore the unknown key.
+            o.put("mid", mid);
+            if (lowData) o.put("ld", true);
+            broadcastOrSend(new Packet('D', o.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception ignored) {
+        }
+        return new SentText(mid, wire, text);
+    }
+
+    /** A BRIDGED text (v1.24): the packet names the ORIGINAL
+     *  sender and carries the bridging provenance, so
+     *  receivers show who really wrote it and the loop rules
+     *  can follow the message. The host relays 'D' packets
+     *  verbatim, so the provenance rides along untouched. */
+    public void sendTextAs(String from, String text, boolean lowData,
+                           BridgeRule.Relayed meta) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("from", from);
+            putText(o, text, channelId);
             o.put("channel", channelId);
             if (lowData) o.put("ld", true);
-            broadcastOrSend(new Packet('T', o.toString().getBytes(StandardCharsets.UTF_8)));
+            BridgeRule.putRelayKeys(o, meta);
+            broadcastOrSend(new Packet('D', o.toString().getBytes(StandardCharsets.UTF_8)));
         } catch (Exception ignored) {
         }
     }
 
-    private byte[] jsonName() {
+    private byte[] jsonName(String mid) {
         try {
             JSONObject o = new JSONObject();
             o.put("name", myName);
             o.put("channel", channelId);
+            o.put("mid", mid == null || mid.isEmpty()
+                    ? java.util.UUID.randomUUID().toString() : mid);
             return o.toString().getBytes(StandardCharsets.UTF_8);
         } catch (Exception e) {
             return myName.getBytes(StandardCharsets.UTF_8);
@@ -213,8 +312,8 @@ public class MeshNet {
                 if (p.type == 'E') floorOwner = null;
             }
             for (Conn c : clients) c.send(p);
-            if (p.type == 'S') listener.onTalker(myName);
-            if (p.type == 'E') listener.onTalker(null);
+            if (p.type == 'S') listener.onTalker(myName, null, "");
+            if (p.type == 'E') listener.onTalker(null, null, "");
         }
     }
 
@@ -351,16 +450,18 @@ public class MeshNet {
                             for (Conn c : clients) {
                                 if (c != from) { /* S also relayed below */ }
                             }
-                            listener.onTalker(from.name);
+                            listener.onTalker(from.name, spurtMeta(p), spurtMid(p));
                         }
                         // floor busy: swallow their spurt entirely
                     }
                 } else {
                     try {
                         JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
-                        listener.onTalker(o.optString("name", "Someone"));
+                        listener.onTalker(o.optString("name", "Someone"),
+                                BridgeRule.relayedFromJson(o, "name"),
+                                o.optString("mid", ""));
                     } catch (Exception e) {
-                        listener.onTalker("Someone");
+                        listener.onTalker("Someone", null, "");
                     }
                 }
                 break;
@@ -388,7 +489,7 @@ public class MeshNet {
                     }
                     relay(p, from);
                 }
-                listener.onTalker(null);
+                listener.onTalker(null, null, "");
                 listener.onSpurtEnd();
                 break;
             }
@@ -401,18 +502,12 @@ public class MeshNet {
                 }
                 break;
             }
-            case 'T': {
-                if (iAmHost) relay(p, from);
-                try {
-                    JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
-                    String ch = o.optString("channel", "");
-                    if (!ch.isEmpty() && !ch.equals(channelId)) break; // another channel's traffic
-                    listener.onText(o.optString("from", "Someone"),
-                            o.optString("text", ""), o.optBoolean("ld", false));
-                } catch (Exception ignored) {
-                }
+            case 'T': // legacy: plain or "wd"-marked text
+                handleText(p, from, iAmHost, false);
                 break;
-            }
+            case 'D': // v1.32: coded text, self-identifying
+                handleText(p, from, iAmHost, true);
+                break;
             case 'M': {
                 try {
                     JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
@@ -433,6 +528,65 @@ public class MeshNet {
             }
             default:
                 break;
+        }
+    }
+
+    /** A text packet: 'T' is the legacy shape (plain text
+     *  or a "wd"-marked coded payload on the "text" key);
+     *  'D' is the v1.32 shape (the coded payload on the "w"
+     *  key, strict-decoded). The host relays either
+     *  verbatim before decoding, so bridged provenance
+     *  rides along untouched. */
+    private void handleText(Packet p, Conn from, boolean iAmHost, boolean codedShape) {
+        if (iAmHost) relay(p, from);
+        try {
+            JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
+            String ch = o.optString("channel", "");
+            if (!ch.isEmpty() && !ch.equals(channelId)) return; // another channel's traffic
+            String teach = o.has("wdt") ? o.optString("wdt", "") : null;
+            WordDict.Result decoded;
+            String wire;
+            boolean coded;
+            if (codedShape) {
+                wire = o.optString("w", "");
+                decoded = WordDict.decodeCoded(wire, teach);
+                coded = true;
+            } else {
+                wire = o.optString("text", "");
+                int wd = o.optInt("wd", 0);
+                decoded = WordDict.decodeMarked(wire, wd, teach);
+                coded = wd > 0;
+            }
+            DictStore.noteReceived(channelId, decoded);
+            listener.onText(o.optString("from", "Someone"),
+                    decoded.text, o.optBoolean("ld", false),
+                    BridgeRule.relayedFromJson(o, "from"),
+                    o.optString("mid", ""), decoded.note, wire, coded);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Bridging provenance from a spurt-start packet, or null
+     *  for a direct spurt or an unparsable packet. The host
+     *  side uses this: it names the talker from the
+     *  connection, but the packet carries the provenance. */
+    private BridgeRule.Relayed spurtMeta(Packet p) {
+        try {
+            JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
+            return BridgeRule.relayedFromJson(o, "name");
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** The spurt message id from a spurt-start packet, or ""
+     *  for a pre-v1.24 sender or an unparsable packet. */
+    private String spurtMid(Packet p) {
+        try {
+            JSONObject o = new JSONObject(new String(p.payload, StandardCharsets.UTF_8));
+            return o.optString("mid", "");
+        } catch (Exception ignored) {
+            return "";
         }
     }
 

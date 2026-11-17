@@ -233,13 +233,17 @@ public class SubscriptionHarness {
         RelayIngest.Decoded d = RelayIngest.decode(k1,
                 RelayCrypto.seal(k1, env.getBytes(StandardCharsets.UTF_8)));
         check("sealed text decodes", d != null && d.isText);
-        check("sealed text content", d != null && "hello there".equals(d.text));
+        // v1.32: the text codes, so the lowercase sentence
+        // start normalizes.
+        check("sealed text content", d != null && "Hello there".equals(d.text));
         check("typed text not low-data", d != null && !d.lowData);
         check("text has zero samples", d != null && d.samples == 0);
 
         String ldEnv = LowDataEnvelope.build("low data words", true);
         RelayIngest.Decoded ld = RelayIngest.decode(k1,
                 RelayCrypto.seal(k1, ldEnv.getBytes(StandardCharsets.UTF_8)));
+        // "low" is not a dictionary word: it travels as an
+        // escape, verbatim — no normalization applies.
         check("low-data marker survives", ld != null && ld.lowData
                 && "low data words".equals(ld.text));
 
@@ -252,7 +256,7 @@ public class SubscriptionHarness {
         RelayIngest.Decoded open = RelayIngest.decode(null,
                 RelayKeys.b64Std(env.getBytes(StandardCharsets.UTF_8)));
         check("open-channel plaintext decodes",
-                open != null && open.isText && "hello there".equals(open.text));
+                open != null && open.isText && "Hello there".equals(open.text));
 
         byte[] burst = new byte[] {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
         RelayIngest.Decoded b = RelayIngest.decode(k1,
@@ -331,7 +335,7 @@ public class SubscriptionHarness {
     private static void stamp() {
         RelayCore.Msg m = msg("cmid-1", "sender-pub");
         RelayIngest.Decoded text = new RelayIngest.Decoded(
-                true, "hi", true, new byte[0], 0);
+                true, "hi", true, new byte[0], 0, null, null);
         JSONObject e = new JSONObject();
         RelayIngest.stampEntry(e, m, text);
         check("stamp writes cmid", "cmid-1".equals(e.optString("cmid", "")));
@@ -341,7 +345,7 @@ public class SubscriptionHarness {
         check("stamp writes no blob for text", e.optString("blob", "").isEmpty());
 
         RelayIngest.Decoded plain = new RelayIngest.Decoded(
-                true, "hi", false, new byte[0], 0);
+                true, "hi", false, new byte[0], 0, null, null);
         JSONObject e2 = new JSONObject();
         RelayIngest.stampEntry(e2, m, plain);
         check("stamp omits lowData for ordinary text",
@@ -349,7 +353,7 @@ public class SubscriptionHarness {
 
         byte[] burst = new byte[] {0x0A, 0x0B, 0x0C};
         RelayIngest.Decoded voice = new RelayIngest.Decoded(
-                false, "", false, burst, 6);
+                false, "", false, burst, 6, null, null);
         JSONObject e3 = new JSONObject();
         RelayIngest.stampEntry(e3, m, voice);
         check("stamp writes blob for voice",

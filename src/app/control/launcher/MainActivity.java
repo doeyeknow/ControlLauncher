@@ -68,6 +68,9 @@ public class MainActivity extends ThemedActivity {
     /** Request the home role on arrival (v1.14 — the overlay
      *  ring's route, since RoleManager needs an activity). */
     public static final String EXTRA_REQUEST_HOME_ROLE = "control.request_home_role";
+    /** Open this camera's detail view on the Cameras page
+     *  (v1.31 — the overlay ring's route). */
+    public static final String EXTRA_CAMERA_ID = "control.camera_id";
     public static final int REQ_HOME_ROLE = 7100;
     public static final int REQ_WALKIE_LISTEN = 7200;
     public static final int REQ_CHAT_LISTEN = 7300;
@@ -76,12 +79,14 @@ public class MainActivity extends ThemedActivity {
     public static final int PAGE_HOME = 1;
     public static final int PAGE_WALKIE = 2;
     public static final int PAGE_CHAT = 3;
+    public static final int PAGE_CAMERAS = 4;
 
     private PagerLayout pager;
     private BrowserPage browserPage;
     private HomePage homePage;
     private WalkiePage walkiePage;
     private ChatPage chatPage;
+    private CameraPage cameraPage;
     private AppsSheetView appsSheet;
     private CircleMenuView circleMenu;
     private BackgroundView backgroundView;
@@ -101,10 +106,12 @@ public class MainActivity extends ThemedActivity {
         homePage = new HomePage(this);
         walkiePage = new WalkiePage(this);
         chatPage = new ChatPage(this);
+        cameraPage = new CameraPage(this);
         pager.addView(browserPage);
         pager.addView(homePage);
         pager.addView(walkiePage);
         pager.addView(chatPage);
+        pager.addView(cameraPage);
         pager.setListener(index -> selectPage(index));
 
         // Stage: the shared background layer at the back, the pager
@@ -148,6 +155,18 @@ public class MainActivity extends ThemedActivity {
 
         RelayClient.ensureRegistered(this);
 
+        // In-app updater (v1.27): quietly check for a newer
+        // version on launch (throttled; failures silent) and
+        // clear out a stale update file. The Settings row
+        // reports what the check found.
+        UpdateManager.onAppLaunch(this);
+
+        // GitHub-hosted word dictionary (v1.29): load the
+        // local build and quietly check for a newer list
+        // (throttled; failures silent). Sending always
+        // works at once on the built-in list.
+        DictStore.onAppLaunch(this);
+
         if (Prefs.get(this).getBoolean(Prefs.KEY_APP_LOCKED, false)) {
             startActivity(new Intent(this, LockActivity.class));
         }
@@ -189,6 +208,9 @@ public class MainActivity extends ThemedActivity {
             case CircleMenuView.ITEM_WALLET:
                 startActivity(new Intent(this, WalletActivity.class));
                 break;
+            case CircleMenuView.ITEM_CAMERAS:
+                pager.goToPage(PAGE_CAMERAS, true);
+                break;
             default:
                 break;
         }
@@ -208,6 +230,7 @@ public class MainActivity extends ThemedActivity {
                 case CircleMenuView.ITEM_ACTIVITY: return activityRingItems();
                 case CircleMenuView.ITEM_CONNECTIONS: return connectionsRingItems();
                 case CircleMenuView.ITEM_WALLET: return walletRingItems();
+                case CircleMenuView.ITEM_CAMERAS: return camerasRingItems();
                 default: return new ArrayList<>();
             }
         }
@@ -222,6 +245,8 @@ public class MainActivity extends ThemedActivity {
                     return "No conversations yet — exchange contact cards or start a chat";
                 case CircleMenuView.ITEM_WALLET:
                     return "No cards saved yet — add one in the wallet";
+                case CircleMenuView.ITEM_CAMERAS:
+                    return "No cameras yet — scan or add one on the Cameras page";
                 default:
                     return "";
             }
@@ -247,6 +272,10 @@ public class MainActivity extends ThemedActivity {
                 case RingItems.Action.OPEN_CONVO:
                     pager.goToPage(PAGE_CHAT, true);
                     chatPage.openConvoById(action.text);
+                    break;
+                case RingItems.Action.OPEN_CAMERA:
+                    pager.goToPage(PAGE_CAMERAS, true);
+                    cameraPage.openCameraById(action.text);
                     break;
                 case RingItems.Action.HOME_ROLE:
                     HomeRole.request(MainActivity.this, REQ_HOME_ROLE);
@@ -464,6 +493,19 @@ public class MainActivity extends ThemedActivity {
         return out;
     }
 
+    /** Cameras: the saved cameras by name. Tapping one
+     *  lands on the Cameras page with its detail view open.
+     *  Shared (proxied) cameras are not listed — they are
+     *  session-only and may already be gone. */
+    private List<RingItems.Item> camerasRingItems() {
+        List<RingItems.Item> out = new ArrayList<>();
+        for (CamRecord rec : cameraPage.ringCameras()) {
+            out.add(RingItems.Item.glyph(rec.displayName(), PageGlyphs.CAMERA,
+                    RingItems.Action.openCamera(rec.id)));
+        }
+        return out;
+    }
+
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -503,6 +545,12 @@ public class MainActivity extends ThemedActivity {
         if (intent.getBooleanExtra(EXTRA_REQUEST_HOME_ROLE, false)) {
             HomeRole.request(this, REQ_HOME_ROLE);
         }
+        if (intent.hasExtra(EXTRA_CAMERA_ID)) {
+            // The overlay ring's camera route: land on the
+            // Cameras page with that camera's detail open.
+            pager.goToPage(PAGE_CAMERAS, false);
+            cameraPage.openCameraById(intent.getStringExtra(EXTRA_CAMERA_ID));
+        }
     }
 
     private void selectPage(int index) {
@@ -524,6 +572,7 @@ public class MainActivity extends ThemedActivity {
             case PAGE_HOME: return homePage;
             case PAGE_WALKIE: return walkiePage;
             case PAGE_CHAT: return chatPage;
+            case PAGE_CAMERAS: return cameraPage;
             default: return null;
         }
     }
@@ -540,6 +589,14 @@ public class MainActivity extends ThemedActivity {
         homePage.refresh();
         if (backgroundView != null) backgroundView.refresh();
         MeshInternet.reconcile(this, false);
+        // The hold-anywhere ring service stops itself whenever
+        // its bridge watch ends (reboot, bridge restart), and
+        // until v1.43 nothing but a Settings/Deep-view visit
+        // brought it back — so the ring silently stayed dead
+        // over other apps. Every foregrounding re-enforces the
+        // gates (one local-socket ping; starting an already
+        // running service is a no-op).
+        OverlayRingService.reconcile(this);
     }
 
     @Override
@@ -547,6 +604,17 @@ public class MainActivity extends ThemedActivity {
         PagerLayout.PagerPage p = pageAt(currentPage);
         if (p != null) p.onPageHidden();
         pagesLive = false;
+        // A menu left open across a backgrounding keeps the
+        // shared "a menu is open" count raised, and the overlay
+        // service refuses to open the ring while any menu
+        // reports open — so a stale in-launcher menu would
+        // suppress the hold-anywhere ring over other apps until
+        // the menu was opened and closed again. The menu is not
+        // visible while paused anyway; close it.
+        if (circleMenu != null && circleMenu.isOpen()) {
+            circleMenu.close();
+            pager.setMenuOpen(false);
+        }
         super.onPause();
     }
 
@@ -556,6 +624,7 @@ public class MainActivity extends ThemedActivity {
         browserPage.onPageDestroy();
         walkiePage.onPageDestroy();
         chatPage.onPageDestroy();
+        cameraPage.onPageDestroy();
         super.onDestroy();
     }
 
@@ -599,7 +668,12 @@ public class MainActivity extends ThemedActivity {
         if (currentPage == PAGE_CHAT && chatPage.onBackPressed()) {
             return;
         }
-        // Back from Browser/Walkie/Chat returns to Home; on Home there
+        // On the Cameras page, Back inside a detail view
+        // returns to the grid first.
+        if (currentPage == PAGE_CAMERAS && cameraPage.onBackPressed()) {
+            return;
+        }
+        // Back from Browser/Walkie/Chat/Cameras returns to Home; on Home there
         // is nowhere to go (a home screen has no back).
         if (currentPage != PAGE_HOME) {
             pager.goToPage(PAGE_HOME, true);

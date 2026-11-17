@@ -21,6 +21,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Camera discovery (v1.31): ONVIF WS-Discovery listens
+         for multicast replies, which needs a MulticastLock. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -52,6 +55,13 @@
          after a reboot so the bridge comes back by itself.
          Normal-level; no runtime request. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- In-app updater (v1.27): lets Control ask Android whether
+         it may install its own updates, and open the exact
+         system setting when the user has not granted it.
+         Normal-level; the grant itself is the user's tap in
+         Settings, never silent. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
@@ -145,6 +155,33 @@
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ChannelsActivity" android:exported="false" />
         <activity android:name=".ChannelEditActivity" android:exported="false" />
+        <activity android:name=".AppActivitiesActivity" android:exported="false" />
+
+        <!-- Share an app (v1.25): share sheet + hotspot/QR. The
+             configuration change is held so turning the phone
+             does not kill a running hotspot share. -->
+        <activity android:name=".ShareAppActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Share-sheet APK serving (v1.25): serves exactly the
+             one registered APK, by unguessable token, read-only.
+             Not exported; targets read only through the URI
+             grant on the share intent. -->
+        <provider
+            android:name=".ApkShareProvider"
+            android:authorities="app.control.launcher.apkshare"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- Screenshot View/Share serving (v1.35): serves exactly the
+             one registered screenshot, by unguessable token, read-only.
+             Not exported; targets read only through the URI grant on
+             the view/share intent. -->
+        <provider
+            android:name=".ImageShareProvider"
+            android:authorities="app.control.launcher.imageshare"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <!-- SMS remote-control receiver. The BROADCAST_SMS permission
              prevents other apps from spoofing this protected broadcast. -->
@@ -291,6 +328,23 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!-- NFC arm signal (v1.26): HCE presenting side. Answers a
+             SELECT for our AID with the arm payload and nothing
+             else; no new permission (NFC was already held). The
+             service must be exported so the system NFC service
+             can bind it; BIND_NFC_SERVICE restricts the binder. -->
+        <service
+            android:name=".ControlHceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apduservice" />
         </service>
 
     </application>

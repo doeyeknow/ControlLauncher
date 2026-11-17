@@ -38,7 +38,7 @@ echo "== link resources + manifest + assets"
   --manifest AndroidManifest.xml --java "$B/gen" \
   --auto-add-overlay \
   --min-sdk-version 26 --target-sdk-version 34 \
-  --version-code 23 --version-name "1.19" \
+  --version-code 49 --version-name "1.44" \
   -A assets "$B/flata/resources.flata"
 
 echo "== javac"

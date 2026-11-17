@@ -77,6 +77,24 @@ public final class RelayClient {
         });
     }
 
+    // ---- speed probe (v1.23) ----
+
+    /** The walkie mode probe: one timed round trip to the
+     *  relay, delivered on the main thread as elapsed
+     *  milliseconds. A transport failure arrives as err
+     *  ("network") — the caller reads it as unreachable and
+     *  keeps the last mode decision. */
+    public static void probe(final Context c, final Cb<Long> cb) {
+        POOL.execute(() -> {
+            try {
+                long ms = core(c).probeRoundTrip();
+                deliver(() -> cb.ok(ms));
+            } catch (Exception e) {
+                deliverErr(cb, e);
+            }
+        });
+    }
+
     // ---- channel calls ----
 
     public static void listChannels(final Context c,

@@ -139,6 +139,69 @@ public final class WalkieStore {
         return e;
     }
 
+    // ---- wire forms (v1.32) ----
+
+    /** Stamps the wire form exactly as sent/received onto a
+     *  thread entry, plus the original text's byte count and
+     *  whether the payload arrived coded — the long-press
+     *  "View encoded message" dialog reads these three keys
+     *  and nothing else. Entries written before v1.32 lack
+     *  the keys and read as unrecorded (hasWire false), never
+     *  a crash. A plainBytes of -1 means the original size
+     *  is unknown (an undecoded payload); the dialog omits
+     *  the size line. HistoryRule moves the whole entry, so
+     *  a played message keeps its wire form in History. */
+    public static void stampWire(JSONObject e, String wire, int plainBytes,
+                                 boolean coded) {
+        if (e == null || wire == null) return;
+        put(e, "wire", wire);
+        put(e, "plainBytes", plainBytes);
+        put(e, "coded", coded);
+    }
+
+    /** True when the entry carries a recorded wire form. */
+    public static boolean hasWire(JSONObject e) {
+        return e != null && e.has("wire");
+    }
+
+    // ---- bridged bids (v1.24) ----
+
+    /** Bridge ids this phone has already FORWARDED, persisted
+     *  across restarts: "a message already forwarded is never
+     *  forwarded again" must survive a restart, and live
+     *  bursts leave no thread entry to check. Capped at 500
+     *  (oldest first out) — the traversed set on the message
+     *  itself is the backstop for an evicted bid. This is a
+     *  forwarding record, not a message store: ids only,
+     *  never contents. */
+    private static final String BRIDGE_SEEN_KEY = "bridgeSeen";
+    private static final int MAX_BRIDGE_SEEN = 500;
+
+    public static synchronized boolean hasForwardedBid(Context c, String bid) {
+        if (bid == null || bid.isEmpty()) return false;
+        JSONArray arr = load(c).optJSONArray(BRIDGE_SEEN_KEY);
+        if (arr == null) return false;
+        for (int i = 0; i < arr.length(); i++) {
+            if (bid.equals(arr.optString(i, ""))) return true;
+        }
+        return false;
+    }
+
+    public static synchronized void noteForwardedBid(Context c, String bid) {
+        if (bid == null || bid.isEmpty()) return;
+        JSONArray arr = load(c).optJSONArray(BRIDGE_SEEN_KEY);
+        if (arr == null) {
+            arr = new JSONArray();
+            put(load(c), BRIDGE_SEEN_KEY, arr);
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            if (bid.equals(arr.optString(i, ""))) return;
+        }
+        arr.put(bid);
+        while (arr.length() > MAX_BRIDGE_SEEN) arr.remove(0);
+        save(c);
+    }
+
     // ---- outbox (store-and-forward) ----
 
     public static synchronized void queueText(Context c, String slotIdentity, String text) {

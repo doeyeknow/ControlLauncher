@@ -53,7 +53,8 @@ import java.util.List;
  * Apps-cell starring) is not involved here at all.
  *
  * Items: Home, Browser, Walkie, Apps (pager pages / sheet), then
- * Chat, Activity, Connections, Settings, Wallet (activities).
+ * Chat, Activity, Connections, Settings, Wallet (activities),
+ * and Cameras (pager page, v1.31) — ten destinations, 36° apart.
  */
 public class CircleMenuView extends View {
 
@@ -66,14 +67,15 @@ public class CircleMenuView extends View {
     public static final int ITEM_CONNECTIONS = 6;
     public static final int ITEM_SETTINGS = 7;
     public static final int ITEM_WALLET = 8;
+    public static final int ITEM_CAMERAS = 9;
 
     private static final int[] GLYPHS = {
             PageGlyphs.HOME, PageGlyphs.BROWSER, PageGlyphs.WALKIE, PageGlyphs.APPS,
             PageGlyphs.CHAT, PageGlyphs.ACTIVITY, PageGlyphs.CONNECTIONS,
-            PageGlyphs.SETTINGS, PageGlyphs.WALLET};
+            PageGlyphs.SETTINGS, PageGlyphs.WALLET, PageGlyphs.CAMERA};
     private static final String[] LABELS = {
             "Home", "Browser", "Walkie", "Apps",
-            "Chat", "Activity", "Connections", "Settings", "Wallet"};
+            "Chat", "Activity", "Connections", "Settings", "Wallet", "Cameras"};
 
     public interface Listener {
         void onChoose(int item);

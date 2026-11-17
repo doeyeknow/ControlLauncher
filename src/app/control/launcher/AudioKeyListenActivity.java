@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.nfc.NfcAdapter;
+import android.nfc.Tag;
+import android.nfc.tech.IsoDep;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -25,6 +28,16 @@ import android.widget.Toast;
  * is named honestly and listening continues. Listening times out
  * after 30 seconds and always releases the microphone — on
  * success, on timeout, on pause, on destroy.
+ *
+ * v1.26: the screen also arms NFC reader mode while it is open.
+ * Tapping the phones back to back (screen on, backs together)
+ * confirms the listen is armed — the tap carries only an arm
+ * signal (see NfcArm); the sound still carries the key. The tap
+ * is a shortcut, never the only way in: opening this screen arms
+ * listening by itself, with or without a tap, and a tap with no
+ * armed screen does nothing (see ListenArm). The type tones at
+ * the head of each packet are announced as they arrive, so the
+ * screen names what is coming before the payload finishes.
  */
 public class AudioKeyListenActivity extends ThemedActivity {
 
@@ -43,6 +56,7 @@ public class AudioKeyListenActivity extends ThemedActivity {
 
     public static final String EXPECT_CHANNEL = "channel";
     public static final String EXPECT_CONTACT = "contact";
+    public static final String EXPECT_MESH = "mesh";
     public static final String EXPECT_ANY = "any";
 
     private static final int REQ_MIC = 7801;
@@ -51,6 +65,8 @@ public class AudioKeyListenActivity extends ThemedActivity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AudioKeyAudio.Listener listener = new AudioKeyAudio.Listener();
+    /** The arm rules: manual arming + tap confirmation. */
+    private final ListenArm arm = new ListenArm();
 
     private String expect = EXPECT_ANY;
     private boolean listening;
@@ -58,9 +74,41 @@ public class AudioKeyListenActivity extends ThemedActivity {
     private ProgressBar levelBar;
     private TextView status;
     private Button againButton;
+    private NfcAdapter nfcAdapter;
+    private boolean readerArmed;
+
+    /** Runs on a binder thread: SELECT our AID, verify the arm
+     *  signal, and only then touch the UI thread. Any failure
+     *  (tag left early, wrong answer) is ignored silently — the
+     *  sound path still works without the tap. */
+    private final NfcAdapter.ReaderCallback readerCallback = new NfcAdapter.ReaderCallback() {
+        @Override
+        public void onTagDiscovered(Tag tag) {
+            IsoDep iso = IsoDep.get(tag);
+            if (iso == null) return;
+            try {
+                iso.setTimeout(1000);
+                iso.connect();
+                byte[] resp = iso.transceive(NfcArm.buildSelectApdu());
+                iso.close();
+                if (!NfcArm.isArmResponse(resp)) return;
+                runOnUiThread(() -> {
+                    if (arm.tap()) {
+                        status.setText("Tap heard — listening for the sound…");
+                    }
+                });
+            } catch (Exception ignored) {
+                try {
+                    iso.close();
+                } catch (Exception ignored2) {
+                }
+            }
+        }
+    };
 
     private final Runnable timeout = () -> {
         if (done) return;
+        arm.timeout();
         stopListening();
         status.setText("Nothing heard in 30 seconds. Make sure the other "
                 + "phone is playing, the phones are close, and the room is "
@@ -88,6 +136,20 @@ public class AudioKeyListenActivity extends ThemedActivity {
         i.putExtra(EXTRA_MESSAGE, "Ask the other phone to play their contact "
                 + "card (Contacts → My contact card). Hold the phones near "
                 + "each other in a reasonably quiet room.");
+        return i;
+    }
+
+    /** Mesh join listens for a mesh invite, which names the mesh
+     *  to join and how to reach it. */
+    public static Intent meshIntent(Context c) {
+        Intent i = new Intent(c, AudioKeyListenActivity.class);
+        i.putExtra(EXTRA_EXPECT, EXPECT_MESH);
+        i.putExtra(EXTRA_TITLE, "Join a mesh by sound");
+        i.putExtra(EXTRA_MESSAGE, "Ask the phone hosting the mesh to play "
+                + "its mesh sound (Walkie page → Share mesh by sound). "
+                + "This phone joins the mesh named in the sound. Hold the "
+                + "phones near each other in a reasonably quiet room — "
+                + "or tap them back to back first, then play the sound.");
         return i;
     }
 
@@ -148,6 +210,8 @@ public class AudioKeyListenActivity extends ThemedActivity {
         cancel.setOnClickListener(v -> finish());
         root.addView(cancel, Ui.wrap(0, 8, 0, 0, this));
 
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
+
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(
@@ -181,12 +245,51 @@ public class AudioKeyListenActivity extends ThemedActivity {
                 == PackageManager.PERMISSION_GRANTED) {
             startListening();
         }
+        armReaderMode();
     }
 
     @Override
     protected void onPause() {
+        disarmReaderMode();
+        arm.disarm();
         stopListening();
         super.onPause();
+    }
+
+    /** Arms NFC reader mode while this screen is in front: a tap
+     *  from the other phone's HCE service confirms the listen.
+     *  No NFC hardware, or NFC off, means no reader mode — the
+     *  screen still listens by sound alone, and says nothing
+     *  about a tap it cannot hear. */
+    private void armReaderMode() {
+        if (nfcAdapter == null || done) return;
+        try {
+            nfcAdapter.enableReaderMode(this, readerCallback,
+                    NfcAdapter.FLAG_READER_NFC_A
+                            | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                    null);
+            readerArmed = true;
+            if (listening) refreshIdleStatus();
+        } catch (Exception ignored) {
+            readerArmed = false;
+        }
+    }
+
+    private void disarmReaderMode() {
+        if (nfcAdapter == null || !readerArmed) return;
+        readerArmed = false;
+        try {
+            nfcAdapter.disableReaderMode(this);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** The resting status line: listening, plus the tap hint only
+     *  when reader mode is actually armed. */
+    private void refreshIdleStatus() {
+        status.setText(readerArmed
+                ? "Listening… You can also tap the phones back to back."
+                : "Listening…");
     }
 
     @Override
@@ -197,7 +300,7 @@ public class AudioKeyListenActivity extends ThemedActivity {
 
     private void startListening() {
         if (listening || done) return;
-        status.setText("Listening…");
+        refreshIdleStatus();
         levelBar.setProgress(0);
         boolean started = listener.start(new AudioKeyAudio.Listener.Cb() {
             @Override public void onLevel(double level) {
@@ -206,6 +309,17 @@ public class AudioKeyListenActivity extends ThemedActivity {
 
             @Override public void onFrame(byte[] payload) {
                 onHeard(payload);
+            }
+
+            @Override public void onTypeHeard(int kind) {
+                if (AudioKeyPayload.isKnownKind(kind)) {
+                    status.setText("Hearing a "
+                            + AudioKeyPayload.kindName(kind) + "…");
+                } else {
+                    status.setText("Hearing a packet type this version "
+                            + "doesn't know — it will be ignored. "
+                            + "Still listening…");
+                }
             }
 
             @Override public void onCrcError() {
@@ -218,6 +332,7 @@ public class AudioKeyListenActivity extends ThemedActivity {
             }
         });
         if (!started) return;
+        arm.arm();
         listening = true;
         ui.postDelayed(timeout, LISTEN_TIMEOUT_MS);
     }
@@ -238,15 +353,15 @@ public class AudioKeyListenActivity extends ThemedActivity {
         }
         boolean wanted = EXPECT_ANY.equals(expect)
                 || (EXPECT_CHANNEL.equals(expect) && d.kind == AudioKeyPayload.KIND_CHANNEL)
-                || (EXPECT_CONTACT.equals(expect) && d.kind == AudioKeyPayload.KIND_CONTACT);
+                || (EXPECT_CONTACT.equals(expect) && d.kind == AudioKeyPayload.KIND_CONTACT)
+                || (EXPECT_MESH.equals(expect) && d.kind == AudioKeyPayload.KIND_MESH);
         if (!wanted) {
             status.setText("That was a " + AudioKeyPayload.kindName(d.kind)
-                    + " — still listening for "
-                    + (EXPECT_CHANNEL.equals(expect) ? "a channel invite."
-                    : "a contact card."));
+                    + " — still listening for " + expectedName() + ".");
             return;
         }
         done = true;
+        arm.disarm();
         stopListening();
         OwnLog.log(this, "Key share", "Heard " + describe(d) + ", origin UI");
         Intent out = new Intent();
@@ -255,7 +370,14 @@ public class AudioKeyListenActivity extends ThemedActivity {
         finish();
     }
 
-    /** Identifiers only — never key material. */
+    private String expectedName() {
+        if (EXPECT_CHANNEL.equals(expect)) return "a channel invite";
+        if (EXPECT_CONTACT.equals(expect)) return "a contact card";
+        if (EXPECT_MESH.equals(expect)) return "a mesh invite";
+        return "a key";
+    }
+
+    /** Identifiers only — never key material, never addresses. */
     private static String describe(AudioKeyPayload.Decoded d) {
         switch (d.kind) {
             case AudioKeyPayload.KIND_CHANNEL:
@@ -264,6 +386,9 @@ public class AudioKeyListenActivity extends ThemedActivity {
                 return "contact card for " + d.name;
             case AudioKeyPayload.KIND_CHAT:
                 return "chat key for " + d.name;
+            case AudioKeyPayload.KIND_MESH:
+                return "mesh invite for " + d.channelName + " via "
+                        + (d.road == AudioKeyPayload.ROAD_LAN ? "LAN" : "Wi-Fi Direct");
             default:
                 return "key";
         }

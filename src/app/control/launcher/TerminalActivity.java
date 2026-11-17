@@ -48,6 +48,12 @@ import java.util.List;
  * success. Every run is audit-logged with origin UI (typed
  * commands by {@link AdbStarter#runShellCommand}, the preset by
  * the restart flow it reuses).
+ *
+ * v1.21: the transcript survives recreation (saved instance
+ * state, same cap) and the scroll stays pinned to the newest
+ * output across layout changes — but only while the user is at
+ * the bottom; scrolling up to read holds the reading position
+ * (see {@link TranscriptScroll}).
  */
 public class TerminalActivity extends ThemedActivity {
 
@@ -59,9 +65,15 @@ public class TerminalActivity extends ThemedActivity {
     }
 
     private static final int MAX_HISTORY = 20;
-    /** Transcript cap: older output is trimmed past this size. */
-    private static final int TRANSCRIPT_CAP = 120_000;
-    private static final int TRANSCRIPT_KEEP = 100_000;
+    /** Transcript cap/keep: the shipping values live in
+     *  {@link TranscriptScroll} so the harness proves the exact
+     *  rule the activity applies. */
+    private static final int TRANSCRIPT_CAP = TranscriptScroll.CAP;
+    private static final int TRANSCRIPT_KEEP = TranscriptScroll.KEEP;
+    /** Saved-state key for the transcript text (v1.21). */
+    private static final String STATE_TRANSCRIPT = "control:transcript";
+    /** "Near the bottom" tolerance for staying pinned (v1.21). */
+    private static final int BOTTOM_SLOP_DP = 8;
 
     private TextView transcriptView;
     private ScrollView transcriptScroll;
@@ -76,6 +88,16 @@ public class TerminalActivity extends ThemedActivity {
     private String token = "";
     private boolean running = false;
     private boolean destroyed = false;
+    /**
+     * Whether the transcript view is pinned to the bottom (v1.21).
+     * True while the user sits at (or near) the newest output;
+     * scrolling up to read earlier output unpins, and only a
+     * return to the bottom re-pins. Layout changes and new
+     * output scroll to the bottom ONLY while pinned — a user
+     * reading earlier output is never yanked.
+     */
+    private boolean pinnedToBottom = true;
+    private int bottomSlopPx = 0;
 
     /** Most-recent-first typed commands (never holding the token). */
     private final List<String> history = new ArrayList<>();
@@ -119,6 +141,30 @@ public class TerminalActivity extends ThemedActivity {
         transcriptView.setTextIsSelectable(true);
         transcriptView.setPadding(pad, Ui.dp(this, 10), pad, Ui.dp(this, 10));
         transcriptScroll.addView(transcriptView);
+        // v1.21 — scroll pinning. The pin tracks the user's real
+        // position: any scroll change recomputes it from the new
+        // offset, and any layout change (keyboard show/hide with
+        // adjustResize, rotation, content growth) re-pins to the
+        // bottom — but only while pinned. Two listeners because
+        // neither alone sees both causes: the ScrollView's own
+        // bounds change on resize, the child's on new output.
+        bottomSlopPx = Ui.dp(this, BOTTOM_SLOP_DP);
+        transcriptScroll.setOnScrollChangeListener((v, scrollX, scrollY, oldX, oldY) -> {
+            pinnedToBottom = TranscriptScroll.atBottom(scrollY,
+                    transcriptView.getHeight(), transcriptScroll.getHeight(),
+                    bottomSlopPx);
+        });
+        View.OnLayoutChangeListener repin = (v, left, top, right, bottom,
+                                             oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (left == oldLeft && top == oldTop && right == oldRight && bottom == oldBottom) {
+                return;
+            }
+            if (pinnedToBottom) {
+                transcriptScroll.post(() -> transcriptScroll.fullScroll(View.FOCUS_DOWN));
+            }
+        };
+        transcriptScroll.addOnLayoutChangeListener(repin);
+        transcriptView.addOnLayoutChangeListener(repin);
         root.addView(transcriptScroll);
 
         statusLine = Ui.text(this, "", 13, Ui.DIM);
@@ -199,9 +245,31 @@ public class TerminalActivity extends ThemedActivity {
         row.addView(clearButton);
         root.addView(row);
 
-        appendLine("Control terminal — commands run as the shell user over ADB.");
-        appendLine("Type a command above, or tap Enable deep view to start the bridge.");
+        // v1.21 — a recreation (rotation, config change, process
+        // death while backgrounded) restores the transcript saved
+        // in onSaveInstanceState instead of starting over at the
+        // header lines. The saved text already holds the headers
+        // when they were there, so they are appended only on a
+        // genuinely fresh open. The transcript holds redacted
+        // text only — the token is masked at append time — so
+        // saving it stores no secret.
+        String restored = savedInstanceState == null
+                ? null : savedInstanceState.getString(STATE_TRANSCRIPT);
+        if (restored != null && !restored.isEmpty()) {
+            transcript.append(restored);
+            renderTranscript();
+        } else {
+            appendLine("Control terminal — commands run as the shell user over ADB.");
+            appendLine("Type a command above, or tap Enable deep view to start the bridge.");
+        }
         refreshPairedLine();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_TRANSCRIPT, TranscriptScroll.trim(
+                transcript.toString(), TRANSCRIPT_CAP, TRANSCRIPT_KEEP));
     }
 
     @Override
@@ -299,15 +367,37 @@ public class TerminalActivity extends ThemedActivity {
         if (transcript.length() > 0) transcript.append('\n');
         transcript.append(line);
         if (transcript.length() > TRANSCRIPT_CAP) {
-            transcript.delete(0, transcript.length() - TRANSCRIPT_KEEP);
-            transcript.insert(0, "[earlier output trimmed]\n");
+            // Same rule as before (keep the last TRANSCRIPT_KEEP
+            // characters, marker at the head), now shared with the
+            // saved-state path via TranscriptScroll.
+            String trimmed = TranscriptScroll.trim(
+                    transcript.toString(), TRANSCRIPT_CAP, TRANSCRIPT_KEEP);
+            transcript.setLength(0);
+            transcript.append(trimmed);
         }
         renderTranscript();
     }
 
     private void renderTranscript() {
+        // v1.21 — the pin is captured BEFORE setText: replacing
+        // the text can itself move the scroll offset (and the
+        // scroll listener would then report the transient
+        // position), so the decision must use the position the
+        // user was actually at. Pinned: scroll to the new output
+        // after layout. Unpinned: hold the reading position —
+        // restore the offset the user was at, so new output
+        // neither yanks them to the bottom nor jumps them to
+        // the top.
+        boolean wasPinned = pinnedToBottom;
+        int stayY = transcriptScroll.getScrollY();
         transcriptView.setText(transcript.toString());
-        transcriptScroll.post(() -> transcriptScroll.fullScroll(View.FOCUS_DOWN));
+        transcriptScroll.post(() -> {
+            if (wasPinned) {
+                transcriptScroll.fullScroll(View.FOCUS_DOWN);
+            } else {
+                transcriptScroll.scrollTo(0, stayY);
+            }
+        });
     }
 
     private static String trimTrailingBlank(String s) {

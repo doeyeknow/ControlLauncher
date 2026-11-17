@@ -83,6 +83,15 @@ public final class WalletStore {
         if (ks.containsAlias(KEY_ALIAS)) {
             return (SecretKey) ks.getKey(KEY_ALIAS, null);
         }
+        return generateKey();
+    }
+
+    /** Generate the vault key with the one spec this store has
+     *  always used: AES-256, GCM, no padding, randomized
+     *  encryption required, not auth-bound. Factored so
+     *  regeneration (v1.39) creates exactly the same key shape
+     *  as first creation — the spec lives in one place. */
+    private static SecretKey generateKey() throws Exception {
         KeyGenerator gen = KeyGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         gen.init(new KeyGenParameterSpec.Builder(KEY_ALIAS,
@@ -93,6 +102,22 @@ public final class WalletStore {
                 .setRandomizedEncryptionRequired(true)
                 .build());
         return gen.generateKey();
+    }
+
+    /** Delete the vault key entry and generate a fresh one with
+     *  the exact existing spec. SAVE PATH ONLY, and only under
+     *  the WalletKeyRecovery decision: a new key orphans every
+     *  card sealed under the old one, so a non-empty vault
+     *  requires the user's confirmation first (enforced by the
+     *  caller, not here). Never call this on the decrypt/reveal
+     *  path. The Keystore calls are Android-only and proven
+     *  on-device; the decision rule is harness-pinned in
+     *  WalletKeyRecovery. */
+    public static synchronized void regenerateKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        ks.deleteEntry(KEY_ALIAS);
+        generateKey();
     }
 
     // ---- crypto through the shipping core ----

@@ -81,6 +81,24 @@ public class OverlayRingService extends Service {
      *  0 when no ping has completed or the bridge reported none. */
     public static volatile int lastBridgeVersion;
 
+    /** Watch-stage diagnostics (v1.43), read by {@link #statusLine2}:
+     *  when the watch last ended and why, when the last hold
+     *  arrived, and the last overlay-window failure. Never
+     *  coordinates. These exist because the ring's failure was
+     *  invisible: the gates could all pass while no hold ever
+     *  arrived or the window add silently failed. */
+    public static volatile String lastWatchEndReason = "";
+    public static volatile long lastWatchEndAtMs;
+    public static volatile long lastHoldAtMs;
+    public static volatile String lastShowError = "";
+
+    /** Last bridge-side hold-watch diagnostics (v1.44), fetched
+     *  by reconcile() whenever the bridge is CURRENT. Null when
+     *  no fetch has succeeded (an old bridge, a failed fetch, or
+     *  the switch off) — the Settings line then falls back to
+     *  the v1.43 app-side-only wording. */
+    public static volatile HoldWatchStatus lastHoldStatus;
+
     private HoldWatchClient watcher;
     private WindowManager windowManager;
     private FrameLayout overlayRoot;
@@ -119,6 +137,24 @@ public class OverlayRingService extends Service {
     }
 
     /**
+     * Second Settings line (v1.43, extended v1.44): which stage
+     * of the hold-anywhere path last failed, if any. Empty when
+     * the switch is off (the stages are stale noise then). With
+     * bridge-side diagnostics (v10 bridge), the line names the
+     * picked device and the frame/hold counts, so a dead stream,
+     * a parser that never fires, and a dropped hold tell apart;
+     * without them it keeps the v1.43 app-side wording. The
+     * composition lives in {@link HoldWatchStatus} (pure Java,
+     * harness-pinned). No coordinates, ever.
+     */
+    public static String statusLine2(Context c) {
+        return HoldWatchStatus.formatLine(switchOn(c), serviceAlive,
+                lastWatchEndReason, lastWatchEndAtMs, lastHoldAtMs,
+                lastShowError, lastHoldStatus,
+                android.os.SystemClock.elapsedRealtime());
+    }
+
+    /**
      * Enforce the gating: start the service when the switch is
      * on, the overlay permission is granted, and the bridge
      * answers at the required version; stop it otherwise. Runs
@@ -146,6 +182,25 @@ public class OverlayRingService extends Service {
             BridgeGate.State bridge = BridgeGate.classify(ping.ok, version);
             lastBridgeState = bridge;
             lastBridgeVersion = version;
+            // Bridge-side hold-watch diagnostics (v1.44): one
+            // more local-socket round trip, only when the
+            // switch is on and the bridge is CURRENT (v10+),
+            // which is exactly when the op exists. A v9 bridge
+            // would refuse it, so it is never asked. The fetch
+            // runs before the ping-done callback below, so a
+            // visible screen re-renders from fresh data.
+            if (switchOn(app) && bridge == BridgeGate.State.CURRENT) {
+                try {
+                    ShellBridgeClient.Response st =
+                            ShellBridgeClient.holdWatchStatus(app);
+                    lastHoldStatus = st.ok
+                            ? HoldWatchStatus.parse(st.text) : null;
+                } catch (Exception ignored) {
+                    lastHoldStatus = null;
+                }
+            } else {
+                lastHoldStatus = null;
+            }
             boolean want = BridgeGate.wantService(
                     switchOn(app), overlayGranted(app), bridge);
             Intent intent = new Intent(app, OverlayRingService.class);
@@ -199,6 +254,8 @@ public class OverlayRingService extends Service {
                 // feature simply stops. The Settings row reports
                 // it; the next reconcile restarts the watch when
                 // the bridge is back.
+                lastWatchEndReason = reason == null ? "" : reason;
+                lastWatchEndAtMs = android.os.SystemClock.elapsedRealtime();
                 OwnLog.log(OverlayRingService.this, "Hold-anywhere menu",
                         "Watch ended: " + reason);
                 stopSelf();
@@ -236,6 +293,9 @@ public class OverlayRingService extends Service {
     // ---- the overlay ----
 
     private void onHoldDetected(float xPx, float yPx) {
+        // No coordinates are logged or stored — only the fact
+        // that a hold arrived, and when.
+        lastHoldAtMs = android.os.SystemClock.elapsedRealtime();
         if (overlayRoot != null) return; // one ring at a time
         if (CircleMenuView.isAnyMenuOpen()) return; // the built-in menu owns it
         showOverlay(xPx, yPx);
@@ -290,6 +350,7 @@ public class OverlayRingService extends Service {
             params.x = left;
             params.y = top;
             windowManager.addView(root, params);
+            lastShowError = ""; // a good add clears a stale failure
             root.requestFocus();
             // After layout the view's own bounds are real, so the
             // ring clamps against the window — never the 0x0
@@ -301,7 +362,15 @@ public class OverlayRingService extends Service {
             // Overlay permission revoked mid-run, or the window
             // was rejected: drop the ring, keep watching. The
             // next reconcile stops the service if the permission
-            // is really gone.
+            // is really gone. The failure is logged and recorded
+            // (v1.43) — a silently rejected window was
+            // indistinguishable from a dead watch.
+            String err = e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage());
+            if (err.length() > 120) err = err.substring(0, 120);
+            lastShowError = err;
+            OwnLog.log(this, "Hold-anywhere menu",
+                    "Overlay window failed: " + err);
             hideOverlay();
         }
     }

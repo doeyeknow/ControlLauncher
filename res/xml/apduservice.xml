@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HCE registration for the NFC arm signal (v1.26). The AID is
+     0xF0 + "CONTROL" (see NfcArm.AID_HEX). Category "other": the
+     tap is not a payment, so no default-app selection is ever
+     asked for. -->
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/nfc_service_description"
+    android:requireDeviceUnlock="false">
+    <aid-group
+        android:description="@string/nfc_service_description"
+        android:category="other">
+        <aid-filter android:name="F0434F4E54524F4C" />
+    </aid-group>
+</host-apdu-service>

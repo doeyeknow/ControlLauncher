@@ -96,9 +96,36 @@ public final class BridgeControl {
 
     public static ShellBridgeClient.Response setAppEnabled(
             Context c, String origin, String pkg, boolean enabled) {
+        // v1.36: Control itself is refused app-side too (the
+        // bridge enforces it as well) — and the refusal is
+        // audited like any other attempt, without a bridge
+        // call that could never succeed.
+        if (ProtectedOverride.isOwnPackage(pkg)) {
+            ShellBridgeClient.Response r = new ShellBridgeClient.Response(
+                    false, "", ProtectedOverride.lockoutReason(), 0, 0, "", 0);
+            audit(c, origin, "SET_APP_ENABLED", pkg, "enabled=" + enabled, r);
+            return r;
+        }
+        boolean override = ProtectedOverride.overrideApplies(pkg,
+                Prefs.get(c).getBoolean(Prefs.KEY_PROTECTED_OVERRIDE, false));
         return executePackage(c, origin, "SET_APP_ENABLED", pkg,
-                "enabled=" + enabled, true,
-                () -> ShellBridgeClient.setAppEnabled(c, pkg, enabled));
+                "enabled=" + enabled
+                        + (override ? ", " + ProtectedOverride.AUDIT_MARKER : ""),
+                true,
+                () -> ShellBridgeClient.setAppEnabled(c, pkg, enabled, override));
+    }
+
+    /** Audit the protected-package switch flipping, with no
+     *  bridge call: the switch is a client-side pref, but
+     *  turning the override on is a governed act and the log
+     *  must show who did it and when. */
+    public static void logOverrideToggle(Context c, String origin, boolean enabled) {
+        ShellBridgeClient.Response r = new ShellBridgeClient.Response(true,
+                enabled ? "Protected-package override enabled."
+                        : "Protected-package override disabled.",
+                "", 0, 0, "", 0);
+        audit(c, origin, "PROTECTED_OVERRIDE", "Protected packages",
+                "override=" + (enabled ? "on" : "off"), r);
     }
     public static ShellBridgeClient.Response clearAppData(Context c, String origin, String pkg) {
         return executePackage(c, origin, "CLEAR_APP_DATA", pkg, "", true,
@@ -184,6 +211,218 @@ public final class BridgeControl {
             Context c, String origin, String setting, String value) {
         ShellBridgeClient.Response r = ShellBridgeClient.setLauncherSetting(c, setting, value);
         audit(c, origin, "SET_LAUNCHER_SETTING", setting, "value=" + value, r);
+        return r;
+    }
+
+    // ---- v1.35 bridge expansion: package-targeted writes ----
+
+    public static ShellBridgeClient.Response uninstallUser(Context c, String origin, String pkg) {
+        return executePackage(c, origin, "UNINSTALL_USER", pkg, "user=0", true,
+                () -> ShellBridgeClient.uninstallUser(c, pkg));
+    }
+
+    public static ShellBridgeClient.Response installExisting(Context c, String origin, String pkg) {
+        return executePackage(c, origin, "INSTALL_EXISTING", pkg, "user=0", false,
+                () -> ShellBridgeClient.installExisting(c, pkg));
+    }
+
+    public static ShellBridgeClient.Response suspendApp(
+            Context c, String origin, String pkg, boolean suspend) {
+        return executePackage(c, origin, suspend ? "SUSPEND_APP" : "UNSUSPEND_APP", pkg,
+                "suspend=" + suspend, false,
+                () -> ShellBridgeClient.suspendApp(c, pkg, suspend));
+    }
+
+    public static ShellBridgeClient.Response standbySet(
+            Context c, String origin, String pkg, String bucket) {
+        return executePackage(c, origin, "STANDBY_SET", pkg,
+                "bucket=" + bucket, false,
+                () -> ShellBridgeClient.standbySet(c, pkg, bucket));
+    }
+
+    public static ShellBridgeClient.Response runJob(
+            Context c, String origin, String pkg, String jobId) {
+        return executePackage(c, origin, "RUN_JOB", pkg,
+                "jobId=" + jobId, false,
+                () -> ShellBridgeClient.runJob(c, pkg, jobId));
+    }
+
+    public static ShellBridgeClient.Response launchActivity(
+            Context c, String origin, String pkg, String cls) {
+        ShellBridgeClient.Response r = ShellBridgeClient.launchActivity(c, pkg, cls);
+        audit(c, origin, "LAUNCH_ACTIVITY", pkg, "class=" + cls, r);
+        return r;
+    }
+
+    // ---- v1.35 bridge expansion: device-wide writes ----
+
+    public static ShellBridgeClient.Response installApk(
+            Context c, String origin, String path, String pkg) {
+        ShellBridgeClient.Response r = ShellBridgeClient.installApk(c, path);
+        audit(c, origin, "INSTALL_APK", pkg == null ? "(staged APK)" : pkg,
+                "staged install", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response trimCaches(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.trimCaches(c);
+        audit(c, origin, "TRIM_CACHES", "all apps", "target=1GB", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response wmSetSize(
+            Context c, String origin, int width, int height) {
+        ShellBridgeClient.Response r = ShellBridgeClient.wmSetSize(c, width, height);
+        audit(c, origin, "WM_SET_SIZE", "display", "size=" + width + "x" + height, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response wmSetDensity(
+            Context c, String origin, int density) {
+        ShellBridgeClient.Response r = ShellBridgeClient.wmSetDensity(c, density);
+        audit(c, origin, "WM_SET_DENSITY", "display", "density=" + density, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response wmSetOverscan(
+            Context c, String origin, int left, int top, int right, int bottom) {
+        ShellBridgeClient.Response r = ShellBridgeClient.wmSetOverscan(c, left, top, right, bottom);
+        audit(c, origin, "WM_SET_OVERSCAN", "display",
+                "overscan=" + left + "," + top + "," + right + "," + bottom, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response settingPut(
+            Context c, String origin, String namespace, String key, String value) {
+        ShellBridgeClient.Response r = ShellBridgeClient.settingPut(c, namespace, key, value);
+        audit(c, origin, "SETTING_PUT", namespace + "/" + key, "value=" + value, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response nightSet(
+            Context c, String origin, String mode) {
+        ShellBridgeClient.Response r = ShellBridgeClient.nightSet(c, mode);
+        audit(c, origin, "NIGHT_SET", "night mode", "mode=" + mode, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response inputKey(
+            Context c, String origin, int code, String label) {
+        ShellBridgeClient.Response r = ShellBridgeClient.inputKey(c, code);
+        audit(c, origin, "INPUT_KEY", "key event", "key=" + label, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response inputTap(
+            Context c, String origin, int x, int y) {
+        ShellBridgeClient.Response r = ShellBridgeClient.inputTap(c, x, y);
+        audit(c, origin, "INPUT_TAP", "touch", "at=" + x + "," + y, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response inputSwipe(
+            Context c, String origin, int x1, int y1, int x2, int y2, int durationMs) {
+        ShellBridgeClient.Response r = ShellBridgeClient.inputSwipe(c, x1, y1, x2, y2, durationMs);
+        audit(c, origin, "INPUT_SWIPE", "touch",
+                "from=" + x1 + "," + y1 + " to=" + x2 + "," + y2 + " ms=" + durationMs, r);
+        return r;
+    }
+
+    /** The typed text itself is NEVER audited — only that text
+     *  was typed and its length (it may be a password). The
+     *  bridge's response carries the same length-only wording. */
+    public static ShellBridgeClient.Response inputText(
+            Context c, String origin, String escaped) {
+        ShellBridgeClient.Response r = ShellBridgeClient.inputText(c, escaped);
+        audit(c, origin, "INPUT_TEXT", "text entry",
+                "length=" + (escaped == null ? 0 : escaped.length()), r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response screenshot(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.screenshot(c);
+        audit(c, origin, "SCREENSHOT", "screen", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response screenrecordStart(
+            Context c, String origin, int seconds) {
+        ShellBridgeClient.Response r = ShellBridgeClient.screenrecordStart(c, seconds);
+        audit(c, origin, "SCREENRECORD_START", "screen recording", "seconds=" + seconds, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response screenrecordStop(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.screenrecordStop(c);
+        audit(c, origin, "SCREENRECORD_STOP", "screen recording", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response bugreportStart(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.bugreportStart(c);
+        audit(c, origin, "BUGREPORT_START", "bugreport", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response bugreportStop(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.bugreportStop(c);
+        audit(c, origin, "BUGREPORT_STOP", "bugreport", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response doze(
+            Context c, String origin, String action) {
+        ShellBridgeClient.Response r = ShellBridgeClient.doze(c, action);
+        audit(c, origin, "DOZE", "device idle", "action=" + action, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response batterySetLevel(
+            Context c, String origin, int level) {
+        ShellBridgeClient.Response r = ShellBridgeClient.batterySetLevel(c, level);
+        audit(c, origin, "BATTERY_SET_LEVEL", "battery", "level=" + level, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response batteryUnplug(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.batteryUnplug(c);
+        audit(c, origin, "BATTERY_UNPLUG", "battery", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response batteryReset(Context c, String origin) {
+        ShellBridgeClient.Response r = ShellBridgeClient.batteryReset(c);
+        audit(c, origin, "BATTERY_RESET", "battery", "", r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response deviceConfigPut(
+            Context c, String origin, String namespace, String key, String value) {
+        ShellBridgeClient.Response r = ShellBridgeClient.deviceConfigPut(c, namespace, key, value);
+        audit(c, origin, "DEVICE_CONFIG_PUT", namespace + "/" + key, "value=" + value, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response wifiForget(
+            Context c, String origin, String networkId, String ssid) {
+        ShellBridgeClient.Response r = ShellBridgeClient.wifiForget(c, networkId);
+        audit(c, origin, "WIFI_FORGET", ssid == null ? "network " + networkId : ssid,
+                "networkId=" + networkId, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response userCreate(
+            Context c, String origin, String name) {
+        ShellBridgeClient.Response r = ShellBridgeClient.userCreate(c, name);
+        audit(c, origin, "USER_CREATE", "user", "name=" + name, r);
+        return r;
+    }
+
+    public static ShellBridgeClient.Response userRemove(
+            Context c, String origin, int userId, String name) {
+        ShellBridgeClient.Response r = ShellBridgeClient.userRemove(c, userId);
+        audit(c, origin, "USER_REMOVE", "user " + userId,
+                "name=" + (name == null ? "" : name), r);
         return r;
     }
 

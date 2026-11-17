@@ -34,6 +34,22 @@ import java.util.List;
  *      empty / "unversioned" when none was reported — status
  *      lines never read "v0".
  *
+ * v1.33: the required version is 5 (the SET_APP_ENABLED fix
+ * lives in bridge v5). A v4 bridge — current under v1.32 — is
+ * now STALE, and the one-tap stale restart is what brings it
+ * current. The legs below pin that: v4 classifies STALE, v5
+ * classifies CURRENT, and a v4 refusal reads as stale.
+ *
+ * v1.35: the required version is 6 (the bridge expansion).
+ * A v5 bridge — current under v1.33/v1.34 — is now STALE:
+ * v5 classifies STALE, v6 classifies CURRENT, and a v5
+ * refusal reads as stale by version.
+ *
+ * v1.36: the required version is 7 (the protected-package
+ * override). A v6 bridge — current under v1.35 — is now
+ * STALE: v6 classifies STALE, v7 classifies CURRENT, and a
+ * v6 refusal reads as stale by version.
+ *
  * Run (from ~/workspace/control-launcher), with the real
  * org.json jar ONLY on the classpath — android.jar must not
  * come first, or its stub org.json shadows the real one:
@@ -93,6 +109,12 @@ public class BridgeGateHarness {
     // ---- legs ----
 
     private static void versionParsing() {
+        eq(7, BridgeGate.parseVersion(obj("{\"ok\":true,\"version\":7}")),
+                "reported v7 parses");
+        eq(6, BridgeGate.parseVersion(obj("{\"ok\":true,\"version\":6}")),
+                "reported v6 parses");
+        eq(5, BridgeGate.parseVersion(obj("{\"ok\":true,\"version\":5}")),
+                "reported v5 parses");
         eq(4, BridgeGate.parseVersion(obj("{\"ok\":true,\"version\":4}")),
                 "reported v4 parses");
         eq(3, BridgeGate.parseVersion(obj("{\"ok\":true,\"version\":3}")),
@@ -117,11 +139,23 @@ public class BridgeGateHarness {
                 "answered unreported version is STALE");
         eq(BridgeGate.State.STALE, BridgeGate.classify(true, 1),
                 "answered v1 is STALE");
-        eq(BridgeGate.State.CURRENT, BridgeGate.classify(true, 4),
-                "answered v4 is CURRENT");
-        eq(BridgeGate.State.CURRENT, BridgeGate.classify(true, 5),
-                "answered future v5 is CURRENT");
-        eq(4, BridgeGate.HOLD_WATCH_VERSION, "required version is 4");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 4),
+                "answered v4 is STALE under v1.33 (the v5 bridge is required)");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 5),
+                "answered v5 is STALE under v1.35 (the v6 bridge is required)");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 6),
+                "answered v6 is STALE under v1.36 (the v7 bridge is required)");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 7),
+                "answered v7 is STALE under v1.38 (the v8 bridge is required)");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 8),
+                "answered v8 is STALE under v1.43 (the v9 bridge is required)");
+        eq(BridgeGate.State.STALE, BridgeGate.classify(true, 9),
+                "answered v9 is STALE under v1.44 (the v10 bridge is required)");
+        eq(BridgeGate.State.CURRENT, BridgeGate.classify(true, 10),
+                "answered v10 is CURRENT");
+        eq(BridgeGate.State.CURRENT, BridgeGate.classify(true, 11),
+                "answered future v11 is CURRENT");
+        eq(10, BridgeGate.HOLD_WATCH_VERSION, "required version is 10");
     }
 
     private static void wantService() {
@@ -153,14 +187,32 @@ public class BridgeGateHarness {
         check(BridgeGate.isStaleRefusal(obj(
                 "{\"ok\":false,\"version\":3,\"error\":\"something else\"}")),
                 "v3 refusal with another error is stale by version");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":4,\"error\":\"something else\"}")),
+                "v4 refusal with another error is stale by version");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":5,\"error\":\"something else\"}")),
+                "v5 refusal with another error is stale by version under v1.35");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":6,\"error\":\"something else\"}")),
+                "v6 refusal with another error is stale by version under v1.36");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":7,\"error\":\"something else\"}")),
+                "v7 refusal with another error is stale by version under v1.38");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":8,\"error\":\"something else\"}")),
+                "v8 refusal with another error is stale by version under v1.43");
+        check(BridgeGate.isStaleRefusal(obj(
+                "{\"ok\":false,\"version\":9,\"error\":\"something else\"}")),
+                "v9 refusal with another error is stale by version under v1.44");
         check(!BridgeGate.isStaleRefusal(obj(
-                "{\"ok\":false,\"version\":4,"
+                "{\"ok\":false,\"version\":10,"
                         + "\"error\":\"No touchscreen input device found.\"}")),
-                "v4 no-touchscreen refusal is not stale");
+                "v10 no-touchscreen refusal is not stale");
         check(!BridgeGate.isStaleRefusal(obj(
-                "{\"ok\":false,\"version\":4,"
-                        + "\"error\":\"Hold watch refused: transport or token.\"}")),
-                "v4 auth refusal is not stale");
+                "{\"ok\":false,\"version\":10,"
+                        + "\"error\":\"Streaming op refused: transport or token.\"}")),
+                "v10 auth refusal is not stale");
         check(!BridgeGate.isStaleRefusal(obj("{\"ok\":true,\"op\":\"HOLD_WATCH\"}")),
                 "ok ack is not a refusal");
         check(!BridgeGate.isStaleRefusal(obj("{\"ok\":false,\"error\":\"\"}")),
@@ -199,10 +251,12 @@ public class BridgeGateHarness {
     }
 
     private static void versionFragments() {
+        eq("v5 ", BridgeGate.versionFragment(5), "fragment v5");
         eq("v4 ", BridgeGate.versionFragment(4), "fragment v4");
         eq("v3 ", BridgeGate.versionFragment(3), "fragment v3");
         eq("", BridgeGate.versionFragment(0), "fragment empty at 0");
         eq("", BridgeGate.versionFragment(-1), "fragment empty below 0");
+        eq("v5", BridgeGate.versionName(5), "name v5");
         eq("v4", BridgeGate.versionName(4), "name v4");
         eq("unversioned", BridgeGate.versionName(0), "name unversioned at 0");
     }
