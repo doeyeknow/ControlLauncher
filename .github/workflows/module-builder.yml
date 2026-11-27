@@ -31,6 +31,11 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
           MODULE_AI_MODELS: ${{ vars.MODULE_AI_MODELS }}
+          XAI_API_KEYS: ${{ secrets.XAI_API_KEYS }}
+          PERPLEXITY_API_KEYS: ${{ secrets.PERPLEXITY_API_KEYS }}
+          ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
+          AIKEYS_URL: https://relay.eyeknow.app
+          AIKEYS_BUILDER_SECRET: ${{ secrets.AIKEYS_BUILDER_SECRET }}
         run: python3 modules/builder/build-module.py
       - name: Commit module
         run: |
