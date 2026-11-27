@@ -1,6 +1,14 @@
 {
   "modules": [
     {
+      "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
+      "name": "I want all apps to open in popup view and have a dock like o",
+      "version": "1.0.0",
+      "description": "I want all apps to open in popup view and have a dock like osx to use as the app switcher",
+      "sha256": "c5fb4c51df22f1a18514e04d6d30a43cc0fa269064ce9b66011ff7d0e906a75c",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
+    },
+    {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.1",
