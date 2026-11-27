@@ -16,17 +16,90 @@ def payload():
         return json.loads(m.group(1))
     return {"type": "create", "description": body.strip()}
 
+PROVIDERS = {
+    "openai": {"base": "https://api.openai.com/v1", "models": ["gpt-4o-mini"]},
+    "xai": {"base": "https://api.x.ai/v1", "models": ["grok-4-fast"]},
+    "perplexity": {"base": "https://api.perplexity.ai", "models": ["sonar"]},
+    "anthropic": {"base": "https://api.anthropic.com/v1", "models": ["claude-3-5-haiku-latest"]},
+}
+
+def _split(v):
+    return [x.strip() for x in re.split(r"[,;\s]+", v or "") if x.strip()]
+
+def _pool_keys():
+    url = os.environ.get("AIKEYS_URL", "").rstrip("/")
+    secret = os.environ.get("AIKEYS_BUILDER_SECRET", "")
+    if not url or not secret:
+        return []
+    try:
+        req = urllib.request.Request(url + "/v1/aikeys/pool",
+            headers={"Authorization": "Bearer " + secret})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read()).get("keys", [])
+    except Exception:
+        return []
+
+def _report(key_id, ok):
+    url = os.environ.get("AIKEYS_URL", "").rstrip("/")
+    secret = os.environ.get("AIKEYS_BUILDER_SECRET", "")
+    if not url or not secret or not key_id:
+        return
+    try:
+        req = urllib.request.Request(url + "/v1/aikeys/report",
+            data=json.dumps({"id": key_id, "ok": ok}).encode(),
+            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception:
+        pass
+
+def _call_provider(provider, key, model, prompt):
+    cfg = PROVIDERS[provider]
+    if provider == "anthropic":
+        data = json.dumps({
+            "model": model, "max_tokens": 1024,
+            "system": "You build safe data-only Control Launcher modules. Return JSON only.",
+            "messages": [{"role": "user", "content": json.dumps(prompt)}]
+        }).encode()
+        req = urllib.request.Request(cfg["base"] + "/messages", data=data,
+            headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            out = json.loads(r.read())
+        text = "".join(b.get("text", "") for b in out.get("content", []) if b.get("type") == "text")
+        return json.loads(text)
+    data = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
+            {"role": "user", "content": json.dumps(prompt)}
+        ],
+        "response_format": {"type": "json_object"}
+    }).encode()
+    req = urllib.request.Request(cfg["base"] + "/chat/completions", data=data,
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        out = json.loads(r.read())
+    return json.loads(out["choices"][0]["message"]["content"])
+
 def ai_module(p, existing):
-    # Key/model rotation: try each key with each model until
-    # one answers. A key that is out of usage (429), refused
-    # (401/403), or a failing model just moves to the next.
-    raw_keys = os.environ.get("OPENAI_API_KEYS", "") + "," + os.environ.get("OPENAI_API_KEY", "")
-    keys = [k.strip() for k in re.split(r"[,;\s]+", raw_keys) if k.strip()]
-    if not keys:
+    # Rotation across providers, keys, and models: repo-secret
+    # keys first, then the shared pool. Any failure (out of
+    # usage, refused, bad model) moves to the next candidate.
+    attempts = []  # (provider, key, key_id_or_None)
+    env_keys = {
+        "openai": _split(os.environ.get("OPENAI_API_KEYS", "")) + _split(os.environ.get("OPENAI_API_KEY", "")),
+        "xai": _split(os.environ.get("XAI_API_KEYS", "")),
+        "perplexity": _split(os.environ.get("PERPLEXITY_API_KEYS", "")),
+        "anthropic": _split(os.environ.get("ANTHROPIC_API_KEYS", "")),
+    }
+    for provider, keys in env_keys.items():
+        for k in keys:
+            attempts.append((provider, k, None))
+    for entry in _pool_keys():
+        if entry.get("provider") in PROVIDERS and entry.get("key"):
+            attempts.append((entry["provider"], entry["key"], entry.get("id")))
+    if not attempts:
         return None
-    raw_models = os.environ.get("MODULE_AI_MODELS", "") or os.environ.get("MODULE_AI_MODEL", "gpt-4o-mini")
-    models = [m.strip() for m in re.split(r"[,;\s]+", raw_models) if m.strip()] or ["gpt-4o-mini"]
-    base = os.environ.get("MODULE_AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     prompt = {
         "request": p,
         "existingModule": existing,
@@ -38,24 +111,16 @@ def ai_module(p, existing):
             "For updates, keep the same id and bump the patch version."
         ]
     }
-    for key in keys:
+    for provider, key, key_id in attempts:
+        models = _split(os.environ.get(provider.upper() + "_MODELS", "")) or PROVIDERS[provider]["models"]
         for model in models:
-            data = json.dumps({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
-                    {"role": "user", "content": json.dumps(prompt)}
-                ],
-                "response_format": {"type": "json_object"}
-            }).encode()
-            req = urllib.request.Request(base + "/chat/completions", data=data,
-                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             try:
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    out = json.loads(r.read())
-                return json.loads(out["choices"][0]["message"]["content"])
+                result = _call_provider(provider, key, model, prompt)
+                _report(key_id, True)
+                return result
             except Exception:
                 continue
+        _report(key_id, False)
     return None
 
 def fallback(p, existing):
