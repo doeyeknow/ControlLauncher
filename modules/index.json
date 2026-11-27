@@ -3,9 +3,9 @@
     {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
-      "version": "1.0",
-      "description": "Labels channel 1 as Main and channel 2 as Worksite.",
-      "sha256": "7114d17c30b8b69a2af761835d20a224feef140537f113253a1e934a791b09d9",
+      "version": "1.1",
+      "description": "Labels channel 1 as Main and channel 2 as Worksite. Update: channel 3 should be labeled besties",
+      "sha256": "06ab84913d0d766f651ce1baab627a8a0a840a0b367a7116d23f98ae11481447",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
     }
   ]

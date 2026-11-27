@@ -1,8 +1,8 @@
 {
   "id": "walkie-labels",
   "name": "Walkie channel labels",
-  "version": "1.0",
-  "description": "Labels channel 1 as Main and channel 2 as Worksite.",
+  "version": "1.1",
+  "description": "Labels channel 1 as Main and channel 2 as Worksite. Update: channel 3 should be labeled besties",
   "effects": {
     "channelLabels": {
       "1": "Main",
