@@ -3,11 +3,9 @@
     {
       "id": "add-android-widgets-compatibility-to-home-screen",
       "name": "Android widgets",
-      "version": "1.1.0",
-      "description": "Adds Android widget support to the home screen.",
-      "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
-      "status": "completed",
-      "sha256": "384d012a4e4877c3e7216e90288d191bd02b5c2bb6d616d4970d06ff22d20b0e",
+      "version": "1.1.1",
+      "description": "Adds Android widget support to the home screen. Update: widgets arent showing on homestretch. i get an error \"widget not added\". the widget list is showing each widget twice.",
+      "sha256": "5a1ac6974637ee5336ab39e064efb9c2234b153350422d43aa137773b36d4fa5",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json"
     },
     {
@@ -15,6 +13,8 @@
       "name": "I want all apps to open in popup view and have a dock like o",
       "version": "1.0.0",
       "description": "I want all apps to open in popup view and have a dock like osx to use as the app switcher",
+      "usage": "",
+      "status": "completed",
       "sha256": "2eab5eb955587e9f7fc2ab66471ded26a755b771293b028b6f7e5ad2c85715e7",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     },
