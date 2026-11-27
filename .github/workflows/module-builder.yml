@@ -29,6 +29,8 @@ jobs:
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          MODULE_AI_MODELS: ${{ vars.MODULE_AI_MODELS }}
         run: python3 modules/builder/build-module.py
       - name: Commit module
         run: |
