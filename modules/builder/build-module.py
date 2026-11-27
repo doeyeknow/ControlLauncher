@@ -130,8 +130,25 @@ def main():
     (folder / "module.json").write_bytes(raw)
     sha = hashlib.sha256(raw).hexdigest()
     index_path = ROOT / "modules" / "index.json"
-    index = json.loads(index_path.read_text()) if index_path.exists() else {"modules": []}
-    mods = [x for x in index.get("modules", []) if x.get("id") != m["id"]]
+    # Rebuild the index from every module on disk so an entry
+    # can never be lost by a racing or partial run.
+    mods = []
+    for mf in sorted((ROOT / "modules").glob("*/module.json")):
+        try:
+            other = json.loads(mf.read_text())
+        except Exception:
+            continue
+        if other.get("id") and other["id"] != m["id"]:
+            raw = mf.read_bytes()
+            mods.append({"id": other["id"],
+                         "name": other.get("name", other["id"]),
+                         "version": other.get("version", ""),
+                         "description": other.get("description", ""),
+                         "usage": other.get("usage", ""),
+                         "status": "completed",
+                         "sha256": hashlib.sha256(raw).hexdigest(),
+                         "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/"
+                                + other["id"] + "/module.json"})
     mods.append({"id": m["id"], "name": m["name"], "version": m["version"],
         "description": m["description"], "sha256": sha,
         "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/" + m["id"] + "/module.json"})
