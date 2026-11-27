@@ -29,6 +29,14 @@
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json"
     },
     {
+      "id": "since-i-m-not-living-with-my-daughter-who-s-11-y",
+      "name": "since I'm not living with my daughter who's 11 years old I'd",
+      "version": "1.0.0",
+      "description": "since I'm not living with my daughter who's 11 years old I'd like to send her thoughtful and interesting text every morning so I need to create a message to come to me everyday with fun creative loving thoughtful things to say to her",
+      "sha256": "9537c92d7f9d1367259bd5aa75f4bb61e05f02fcafa00ee2dc6326910a87870d",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/since-i-m-not-living-with-my-daughter-who-s-11-y/module.json"
+    },
+    {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.2",
