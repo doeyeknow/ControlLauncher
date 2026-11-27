@@ -3,9 +3,9 @@
     {
       "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
       "name": "Popup apps and dock",
-      "version": "1.1.1",
-      "description": "Apps open in popup view with an OSX-style dock for app switching. Update: the app should close when its icon is long pressed. if its in view and I tap on it,it should minimize",
-      "sha256": "f2ce2ad940decf5a25af60eb34533df8a30459d134611a7986f36d48df25d156",
+      "version": "1.1.2",
+      "description": "Apps open in popup view with an OSX-style dock for app switching. Update: the app should close when its icon is long pressed. if its in view and I tap on it,it should minimize Update: remove favorite apps from dock. it should only display running apps.",
+      "sha256": "620c1d763c1ca4bf37474a6a9740575d40c0a5d3aa8d9dc35ed850642a9383ee",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     },
     {
