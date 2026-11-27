@@ -3,7 +3,7 @@ import hashlib, json, os, re, sys, urllib.request
 from pathlib import Path
 
 ROOT = Path.cwd()
-ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels", "dock", "popupApps"}
+ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels", "dock", "popupApps", "widgets"}
 
 def slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -71,6 +71,7 @@ def fallback(p, existing):
     low = desc.lower()
     if "dock" in low: effects["dock"] = True
     if "popup" in low: effects["popupApps"] = True
+    if "widget" in low: effects["widgets"] = True
     return {"id": mid, "name": desc[:60] or mid, "version": "1.0.0",
             "description": desc, "effects": effects}
 
@@ -79,6 +80,8 @@ def usage_for(m):
     parts = []
     if effects.get("dock"):
         parts.append("Install it and a dock appears at the bottom of the screen. Tap an icon to open or minimize the app; long-press to close it.")
+    if effects.get("widgets"):
+        parts.append("Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.")
     if effects.get("popupApps"):
         parts.append("Apps opened from the dock appear in a popup window.")
     if effects.get("channelLabels"):
@@ -100,7 +103,7 @@ def validate(m):
     clean = {}
     for k, v in effects.items():
         if k not in ALLOWED_EFFECTS: continue
-        if k in ("dock", "popupApps") and isinstance(v, bool):
+        if k in ("dock", "popupApps", "widgets") and isinstance(v, bool):
             clean[k] = v
         elif k == "browserHomepage" and isinstance(v, str) and v.startswith("https://"):
             clean[k] = v
