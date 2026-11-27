@@ -17,32 +17,46 @@ def payload():
     return {"type": "create", "description": body.strip()}
 
 def ai_module(p, existing):
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
+    # Key/model rotation: try each key with each model until
+    # one answers. A key that is out of usage (429), refused
+    # (401/403), or a failing model just moves to the next.
+    raw_keys = os.environ.get("OPENAI_API_KEYS", "") + "," + os.environ.get("OPENAI_API_KEY", "")
+    keys = [k.strip() for k in re.split(r"[,;\s]+", raw_keys) if k.strip()]
+    if not keys:
         return None
+    raw_models = os.environ.get("MODULE_AI_MODELS", "") or os.environ.get("MODULE_AI_MODEL", "gpt-4o-mini")
+    models = [m.strip() for m in re.split(r"[,;\s]+", raw_models) if m.strip()] or ["gpt-4o-mini"]
+    base = os.environ.get("MODULE_AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     prompt = {
         "request": p,
         "existingModule": existing,
         "rules": [
             "Return only JSON for one Control module.",
             "Fields: id, name, version, description, effects.",
-            "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50).",
+            "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50), dock (bool), popupApps (bool), widgets (bool).",
+            "Never include code, scripts, URLs other than browserHomepage, or unsafe effects.",
             "For updates, keep the same id and bump the patch version."
         ]
     }
-    data = json.dumps({
-        "model": os.environ.get("MODULE_AI_MODEL", "gpt-4o-mini"),
-        "messages": [
-            {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
-            {"role": "user", "content": json.dumps(prompt)}
-        ],
-        "response_format": {"type": "json_object"}
-    }).encode()
-    req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=data,
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        out = json.loads(r.read())
-    return json.loads(out["choices"][0]["message"]["content"])
+    for key in keys:
+        for model in models:
+            data = json.dumps({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
+                    {"role": "user", "content": json.dumps(prompt)}
+                ],
+                "response_format": {"type": "json_object"}
+            }).encode()
+            req = urllib.request.Request(base + "/chat/completions", data=data,
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    out = json.loads(r.read())
+                return json.loads(out["choices"][0]["message"]["content"])
+            except Exception:
+                continue
+    return None
 
 def fallback(p, existing):
     if existing:
