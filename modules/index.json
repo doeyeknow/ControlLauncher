@@ -19,6 +19,16 @@
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     },
     {
+      "id": "i-want-to-be-able-to-add-android-widgets-to-the",
+      "name": "I want to be able to add android widgets to the home screen",
+      "version": "1.0.0",
+      "description": "I want to be able to add android widgets to the home screen",
+      "usage": "",
+      "status": "completed",
+      "sha256": "b4bd786f084049586abc3ec6de7b7e85cb1ad13b2fb8c6d16ba60a202b772d26",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json"
+    },
+    {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.2",
