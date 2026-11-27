@@ -1,9 +1,8 @@
 {
   "id": "walkie-labels",
   "name": "Walkie channel labels",
-  "version": "1.2",
-  "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties.",
-  "usage": "Install it and the walkie channels get their labels.",
+  "version": "1.3",
+  "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties. Update: channel 3 should be labeled besties",
   "effects": {
     "channelLabels": {
       "1": "Main",
