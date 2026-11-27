@@ -37,9 +37,9 @@
     {
       "id": "since-i-m-not-living-with-my-daughter-who-s-11-y",
       "name": "since I'm not living with my daughter who's 11 years old I'd",
-      "version": "1.0.0",
-      "description": "since I'm not living with my daughter who's 11 years old I'd like to send her thoughtful and interesting text every morning so I need to create a message to come to me everyday with fun creative loving thoughtful things to say to her",
-      "sha256": "9537c92d7f9d1367259bd5aa75f4bb61e05f02fcafa00ee2dc6326910a87870d",
+      "version": "1.0.1",
+      "description": "since I'm not living with my daughter who's 11 years old I'd like to send her thoughtful and interesting text every morning so I need to create a message to come to me everyday with fun creative loving thoughtful things to say to her Update: to setup the module, i want to select the contact that should receive the message,and a notification with the daily message with a send button. it should also have a settings view that I can set the time and enable auto send",
+      "sha256": "ef50d06b436041bbd00c436e7cd0b62a180f3747db7abca32dd94e2c63db4541",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/since-i-m-not-living-with-my-daughter-who-s-11-y/module.json"
     },
     {
