@@ -39,6 +39,7 @@ jobs:
           AIKEYS_BUILDER_SECRET: ${{ secrets.AIKEYS_BUILDER_SECRET }}
         run: python3 modules/builder/build-module.py
       - name: Commit module
+        if: hashFiles('needs-update.txt') == ''
         run: |
           git config user.name "control-module-builder"
           git config user.email "actions@github.com"
@@ -50,6 +51,14 @@ jobs:
             git pull --rebase origin main
           done
       - name: Comment result
+        if: hashFiles('needs-update.txt') == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue comment ${{ github.event.issue.number }} --body "Module built and published to modules/. Open Control → Modules → Check for modules."
+      - name: Comment needs update
+        if: hashFiles('needs-update.txt') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue edit ${{ github.event.issue.number }} --add-label module-needs-update || true
+          gh issue comment ${{ github.event.issue.number }} --body "This request cannot be done as a data module yet — it needs a new capability built into a signed Control update first, so no module was published. It stays open as a Control feature request."
