@@ -1,9 +1,8 @@
 {
   "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
   "name": "Popup apps and dock",
-  "version": "1.1.0",
-  "description": "Apps open in popup view with an OSX-style dock for app switching.",
-  "usage": "Install it and a dock appears at the bottom of the screen. Tap an icon to open or minimize the app; long-press to close it. Apps opened from the dock appear in a popup window.",
+  "version": "1.1.1",
+  "description": "Apps open in popup view with an OSX-style dock for app switching. Update: the dock shouldnt have a background. make the app icon greyscale if its in the background or minimized",
   "effects": {
     "dock": true,
     "popupApps": true
