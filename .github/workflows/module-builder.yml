@@ -9,6 +9,17 @@ permissions:
   contents: write
   issues: write
 jobs:
+  triage:
+    if: github.event.action == 'opened' && (startsWith(github.event.issue.title, '[Control request]') || startsWith(github.event.issue.title, '[Module update]'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label the request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.event.issue.title }}" == "[Module update]"* ]]; then LABEL=module-update; else LABEL=module-request; fi
+          gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "$LABEL"
+          gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "Request received. It is waiting for owner approval in Control → Modules → Admin."
   build:
     if: contains(github.event.issue.labels.*.name, 'module-approved')
     runs-on: ubuntu-latest
@@ -26,7 +37,10 @@ jobs:
           git add modules
           git diff --cached --quiet && exit 0
           git commit -m "Build module from issue #${{ github.event.issue.number }}"
-          git push
+          for i in 1 2 3; do
+            git push && break
+            git pull --rebase origin main
+          done
       - name: Comment result
         env:
           GH_TOKEN: ${{ github.token }}
