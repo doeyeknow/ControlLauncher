@@ -1,14 +1,12 @@
 {
   "modules": [
     {
-      "id": "walkie-labels",
-      "name": "Walkie channel labels",
-      "version": "1.2",
-      "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties.",
-      "usage": "Install it and the walkie channels get their labels.",
-      "status": "completed",
-      "sha256": "6ca54cac16512cc95ba8d88144331efdc01327c10b8cc04d6d001e4259336a00",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
+      "id": "add-android-widgets-compatibility-to-home-screen",
+      "name": "add android widgets compatibility to home screen",
+      "version": "1.0.0",
+      "description": "add android widgets compatibility to home screen",
+      "sha256": "b977673a240529ba38c860b8710ae3041c67665acb2526628ac0ac3df5a51d7b",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json"
     },
     {
       "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
@@ -19,6 +17,16 @@
       "status": "completed",
       "sha256": "d52630ab43f5fd6cc46806a6dda1cd43665ca97ba73fc2a0147ff69d5415e00d",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
+    },
+    {
+      "id": "walkie-labels",
+      "name": "Walkie channel labels",
+      "version": "1.2",
+      "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties.",
+      "usage": "Install it and the walkie channels get their labels.",
+      "status": "completed",
+      "sha256": "6ca54cac16512cc95ba8d88144331efdc01327c10b8cc04d6d001e4259336a00",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
     }
   ]
 }
