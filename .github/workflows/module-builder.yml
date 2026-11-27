@@ -1,0 +1,30 @@
+name: Module builder
+on:
+  issues:
+    types: [opened, labeled]
+permissions:
+  contents: write
+  issues: write
+jobs:
+  build:
+    if: contains(github.event.issue.labels.*.name, 'module-request') || contains(github.event.issue.labels.*.name, 'module-update')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build module from request
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python3 modules/builder/build-module.py
+      - name: Commit module
+        run: |
+          git config user.name "control-module-builder"
+          git config user.email "actions@github.com"
+          git add modules
+          git diff --cached --quiet && exit 0
+          git commit -m "Build module from issue #${{ github.event.issue.number }}"
+          git push
+      - name: Comment result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment ${{ github.event.issue.number }} --body "Module built and published to modules/. Open Control → Modules → Check for modules."
