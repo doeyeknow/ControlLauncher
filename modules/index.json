@@ -2,11 +2,13 @@
   "modules": [
     {
       "id": "add-android-widgets-compatibility-to-home-screen",
-      "name": "add android widgets compatibility to home screen",
-      "version": "1.0.0",
-      "description": "add android widgets compatibility to home screen",
-      "sha256": "b977673a240529ba38c860b8710ae3041c67665acb2526628ac0ac3df5a51d7b",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json"
+      "name": "Android widgets",
+      "version": "1.1.0",
+      "description": "Adds Android widget support to the home screen.",
+      "sha256": "384d012a4e4877c3e7216e90288d191bd02b5c2bb6d616d4970d06ff22d20b0e",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json",
+      "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
+      "status": "completed"
     },
     {
       "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
@@ -28,11 +30,13 @@
     },
     {
       "id": "i-want-to-be-able-to-add-android-widgets-to-the",
-      "name": "I want to be able to add android widgets to the home screen",
-      "version": "1.0.0",
-      "description": "I want to be able to add android widgets to the home screen",
-      "sha256": "b4bd786f084049586abc3ec6de7b7e85cb1ad13b2fb8c6d16ba60a202b772d26",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json"
+      "name": "Android widgets",
+      "version": "1.1.0",
+      "description": "Adds Android widget support to the home screen.",
+      "sha256": "3b15e972df29dbb3c6f176254762a424982151d5c9b1f9409bc67cdddc37711a",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json",
+      "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
+      "status": "completed"
     },
     {
       "id": "since-i-m-not-living-with-my-daughter-who-s-11-y",
