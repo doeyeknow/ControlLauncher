@@ -27,7 +27,6 @@ def ai_module(p, existing):
             "Return only JSON for one Control module.",
             "Fields: id, name, version, description, effects.",
             "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50).",
-            "Never include code, scripts, URLs other than browserHomepage, or unsafe effects.",
             "For updates, keep the same id and bump the patch version."
         ]
     }
