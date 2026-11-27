@@ -35,6 +35,7 @@ jobs:
           PERPLEXITY_API_KEYS: ${{ secrets.PERPLEXITY_API_KEYS }}
           ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
           META_API_KEYS: ${{ secrets.META_API_KEYS }}
+          GOOGLE_API_KEYS: ${{ secrets.GOOGLE_API_KEYS }}
           AIKEYS_URL: https://relay.eyeknow.app
           AIKEYS_BUILDER_SECRET: ${{ secrets.AIKEYS_BUILDER_SECRET }}
         run: python3 modules/builder/build-module.py
