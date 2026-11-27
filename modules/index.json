@@ -1,28 +1,24 @@
 {
   "modules": [
     {
-      "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
-      "name": "Popup apps and dock",
-      "version": "1.1.2",
-      "description": "Apps open in popup view with an OSX-style dock for app switching. Update: the app should close when its icon is long pressed. if its in view and I tap on it,it should minimize Update: remove favorite apps from dock. it should only display running apps.",
-      "sha256": "620c1d763c1ca4bf37474a6a9740575d40c0a5d3aa8d9dc35ed850642a9383ee",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
-    },
-    {
-      "id": "i-want-to-be-able-to-add-android-widgets-to-the",
-      "name": "I want to be able to add android widgets to the home screen",
-      "version": "1.0.0",
-      "description": "I want to be able to add android widgets to the home screen",
-      "sha256": "b4bd786f084049586abc3ec6de7b7e85cb1ad13b2fb8c6d16ba60a202b772d26",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json"
-    },
-    {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.2",
       "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties.",
-      "sha256": "52813fe92ed863c78479af8530bfa66631cd49364892f4e17bda39d6a8fcbd39",
+      "usage": "Install it and the walkie channels get their labels.",
+      "status": "completed",
+      "sha256": "6ca54cac16512cc95ba8d88144331efdc01327c10b8cc04d6d001e4259336a00",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
+    },
+    {
+      "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
+      "name": "Popup apps and dock",
+      "version": "1.1.0",
+      "description": "Apps open in popup view with an OSX-style dock for app switching.",
+      "usage": "Install it and a dock appears at the bottom of the screen. Tap an icon to open or minimize the app; long-press to close it. Apps opened from the dock appear in a popup window.",
+      "status": "completed",
+      "sha256": "d52630ab43f5fd6cc46806a6dda1cd43665ca97ba73fc2a0147ff69d5415e00d",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     }
   ]
 }
