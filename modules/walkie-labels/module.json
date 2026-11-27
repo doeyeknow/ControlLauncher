@@ -1,0 +1,12 @@
+{
+  "id": "walkie-labels",
+  "name": "Walkie channel labels",
+  "version": "1.0",
+  "description": "Labels channel 1 as Main and channel 2 as Worksite.",
+  "effects": {
+    "channelLabels": {
+      "1": "Main",
+      "2": "Worksite"
+    }
+  }
+}
