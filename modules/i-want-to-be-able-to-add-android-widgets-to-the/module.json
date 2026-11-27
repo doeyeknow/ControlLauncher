@@ -1,7 +1,10 @@
 {
   "id": "i-want-to-be-able-to-add-android-widgets-to-the",
-  "name": "I want to be able to add android widgets to the home screen",
-  "version": "1.0.0",
-  "description": "I want to be able to add android widgets to the home screen",
-  "effects": {}
+  "name": "Android widgets",
+  "version": "1.1.0",
+  "description": "Adds Android widget support to the home screen.",
+  "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
+  "effects": {
+    "widgets": true
+  }
 }
