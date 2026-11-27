@@ -1,20 +1,20 @@
 {
   "modules": [
     {
+      "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
+      "name": "Popup apps and dock",
+      "version": "1.1.1",
+      "description": "Apps open in popup view with an OSX-style dock for app switching. Update: the app should close when its icon is long pressed. if its in view and I tap on it,it should minimize",
+      "sha256": "f2ce2ad940decf5a25af60eb34533df8a30459d134611a7986f36d48df25d156",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
+    },
+    {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.2",
       "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties.",
       "sha256": "52813fe92ed863c78479af8530bfa66631cd49364892f4e17bda39d6a8fcbd39",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
-    },
-    {
-      "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
-      "name": "Popup apps and dock",
-      "version": "1.1.0",
-      "description": "Apps open in popup view with an OSX-style dock for app switching.",
-      "sha256": "209c24495193e99ab9f2502f2c543827d311e92e5ceb4a66554776dae46d80c6",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     }
   ]
 }
