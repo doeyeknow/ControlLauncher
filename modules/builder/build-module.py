@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+import hashlib, json, os, re, sys, urllib.request
+from pathlib import Path
+
+ROOT = Path.cwd()
+ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels"}
+
+def slug(text):
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (s[:48] or "module").strip("-")
+
+def payload():
+    body = os.environ.get("ISSUE_BODY", "")
+    m = re.search(r"```json\s*(\{.*?\})\s*```", body, re.S)
+    if m:
+        return json.loads(m.group(1))
+    return {"type": "create", "description": body.strip()}
+
+def ai_module(p, existing):
+    key = os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        return None
+    prompt = {
+        "request": p,
+        "existingModule": existing,
+        "rules": [
+            "Return only JSON for one Control module.",
+            "Fields: id, name, version, description, effects.",
+            "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50).",
+            "Never include code, scripts, URLs other than browserHomepage, or unsafe effects.",
+            "For updates, keep the same id and bump the patch version."
+        ]
+    }
+    data = json.dumps({
+        "model": os.environ.get("MODULE_AI_MODEL", "gpt-4o-mini"),
+        "messages": [
+            {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
+            {"role": "user", "content": json.dumps(prompt)}
+        ],
+        "response_format": {"type": "json_object"}
+    }).encode()
+    req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=data,
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        out = json.loads(r.read())
+    return json.loads(out["choices"][0]["message"]["content"])
+
+def fallback(p, existing):
+    if existing:
+        m = dict(existing)
+        parts = str(m.get("version", "1.0.0")).split(".")
+        try:
+            parts[-1] = str(int(parts[-1]) + 1)
+            m["version"] = ".".join(parts)
+        except Exception:
+            m["version"] = "1.0.1"
+        detail = p.get("details", "")
+        if detail:
+            m["description"] = (m.get("description", "") + " Update: " + detail).strip()
+        return m
+    desc = p.get("description", "Requested module")
+    mid = slug(desc)
+    return {"id": mid, "name": desc[:60] or mid, "version": "1.0.0",
+            "description": desc, "effects": {}}
+
+def validate(m):
+    if not isinstance(m, dict): raise ValueError("module is not an object")
+    mid = slug(str(m.get("id", "")))
+    if not mid: raise ValueError("module has no id")
+    effects = m.get("effects") or {}
+    if not isinstance(effects, dict): raise ValueError("effects is not an object")
+    clean = {}
+    for k, v in effects.items():
+        if k not in ALLOWED_EFFECTS: continue
+        if k == "browserHomepage" and isinstance(v, str) and v.startswith("https://"):
+            clean[k] = v
+        elif k == "mutedApps" and isinstance(v, list):
+            clean[k] = [x for x in v if isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.]+", x)]
+        elif k == "channelLabels" and isinstance(v, dict):
+            clean[k] = {str(kk): str(vv)[:40] for kk, vv in v.items() if str(kk).isdigit() and 1 <= int(kk) <= 50}
+    return {"id": mid, "name": str(m.get("name", mid))[:80],
+            "version": str(m.get("version", "1.0.0"))[:20],
+            "description": str(m.get("description", ""))[:500], "effects": clean}
+
+def main():
+    p = payload()
+    mid = slug(str(p.get("moduleId", ""))) if p.get("type") == "update" else ""
+    existing = None
+    if mid:
+        f = ROOT / "modules" / mid / "module.json"
+        if f.exists(): existing = json.loads(f.read_text())
+    m = validate(ai_module(p, existing) or fallback(p, existing))
+    if mid: m["id"] = mid
+    folder = ROOT / "modules" / m["id"]
+    folder.mkdir(parents=True, exist_ok=True)
+    raw = (json.dumps(m, indent=2) + "\n").encode()
+    (folder / "module.json").write_bytes(raw)
+    sha = hashlib.sha256(raw).hexdigest()
+    index_path = ROOT / "modules" / "index.json"
+    index = json.loads(index_path.read_text()) if index_path.exists() else {"modules": []}
+    mods = [x for x in index.get("modules", []) if x.get("id") != m["id"]]
+    mods.append({"id": m["id"], "name": m["name"], "version": m["version"],
+        "description": m["description"], "sha256": sha,
+        "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/" + m["id"] + "/module.json"})
+    mods.sort(key=lambda x: x["id"])
+    index_path.write_text(json.dumps({"modules": mods}, indent=2) + "\n")
+    print("built", m["id"], m["version"], sha)
+
+if __name__ == "__main__":
+    main()
