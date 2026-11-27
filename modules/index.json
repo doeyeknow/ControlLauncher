@@ -5,10 +5,10 @@
       "name": "Android widgets",
       "version": "1.1.0",
       "description": "Adds Android widget support to the home screen.",
-      "sha256": "384d012a4e4877c3e7216e90288d191bd02b5c2bb6d616d4970d06ff22d20b0e",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json",
       "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
-      "status": "completed"
+      "status": "completed",
+      "sha256": "384d012a4e4877c3e7216e90288d191bd02b5c2bb6d616d4970d06ff22d20b0e",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/add-android-widgets-compatibility-to-home-screen/module.json"
     },
     {
       "id": "i-want-all-apps-to-open-in-popup-view-and-have-a",
@@ -25,6 +25,8 @@
       "name": "I want apps to open in popup mode, and a dock for running ap",
       "version": "1.0.0",
       "description": "I want apps to open in popup mode, and a dock for running apps similar to osx\n\nRequested from Control on Android. Please build this as a reviewed module if it is a data change, or a signed app update if it needs code.",
+      "usage": "",
+      "status": "completed",
       "sha256": "f22b386b2e6c2be733db7568233414ad7273a755f544bae50a89aa180e531971",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-apps-to-open-in-popup-mode-and-a-dock-for/module.json"
     },
@@ -33,24 +35,36 @@
       "name": "Android widgets",
       "version": "1.1.0",
       "description": "Adds Android widget support to the home screen.",
-      "sha256": "3b15e972df29dbb3c6f176254762a424982151d5c9b1f9409bc67cdddc37711a",
-      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json",
       "usage": "Install it, then on the home screen tap Add widget and pick a widget. Long-press a widget to remove it.",
-      "status": "completed"
+      "status": "completed",
+      "sha256": "3b15e972df29dbb3c6f176254762a424982151d5c9b1f9409bc67cdddc37711a",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-to-be-able-to-add-android-widgets-to-the/module.json"
     },
     {
       "id": "since-i-m-not-living-with-my-daughter-who-s-11-y",
       "name": "since I'm not living with my daughter who's 11 years old I'd",
       "version": "1.0.1",
       "description": "since I'm not living with my daughter who's 11 years old I'd like to send her thoughtful and interesting text every morning so I need to create a message to come to me everyday with fun creative loving thoughtful things to say to her Update: to setup the module, i want to select the contact that should receive the message,and a notification with the daily message with a send button. it should also have a settings view that I can set the time and enable auto send",
+      "usage": "",
+      "status": "completed",
       "sha256": "ef50d06b436041bbd00c436e7cd0b62a180f3747db7abca32dd94e2c63db4541",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/since-i-m-not-living-with-my-daughter-who-s-11-y/module.json"
+    },
+    {
+      "id": "the-modules-should-have-a-settings-icon-that-all",
+      "name": "the modules should have a settings icon that allows the modu",
+      "version": "1.0.0",
+      "description": "the modules should have a settings icon that allows the module to be configured.",
+      "sha256": "824677641390000f48da7c0655f5a1fe0d26ba5922fe7cbbbb1e11588f34e97c",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/the-modules-should-have-a-settings-icon-that-all/module.json"
     },
     {
       "id": "walkie-labels",
       "name": "Walkie channel labels",
       "version": "1.3",
       "description": "Labels channel 1 as Main, channel 2 as Worksite, and channel 3 as besties. Update: channel 3 should be labeled besties",
+      "usage": "",
+      "status": "completed",
       "sha256": "1c910684f4d40166d2505ed6f636a340b9bab84733cb2eb0c921bb53294f15f5",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
     }
