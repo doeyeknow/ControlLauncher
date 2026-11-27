@@ -21,6 +21,7 @@ PROVIDERS = {
     "xai": {"base": "https://api.x.ai/v1", "models": ["grok-4-fast"]},
     "perplexity": {"base": "https://api.perplexity.ai", "models": ["sonar"]},
     "anthropic": {"base": "https://api.anthropic.com/v1", "models": ["claude-3-5-haiku-latest"]},
+    "meta": {"base": "https://api.meta.ai/v1", "models": ["muse-spark-1.3", "muse-wonder-1.0"]},
 }
 
 def _split(v):
@@ -91,6 +92,7 @@ def ai_module(p, existing):
         "xai": _split(os.environ.get("XAI_API_KEYS", "")),
         "perplexity": _split(os.environ.get("PERPLEXITY_API_KEYS", "")),
         "anthropic": _split(os.environ.get("ANTHROPIC_API_KEYS", "")),
+        "meta": _split(os.environ.get("META_API_KEYS", "")),
     }
     for provider, keys in env_keys.items():
         for k in keys:
