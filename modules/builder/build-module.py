@@ -5,6 +5,16 @@ from pathlib import Path
 ROOT = Path.cwd()
 ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels", "dock", "popupApps", "widgets"}
 
+class NeedsUpdate(Exception):
+    pass
+
+def _effective(effects):
+    out = {}
+    for k, v in (effects or {}).items():
+        if v is True or (isinstance(v, (list, dict)) and v) or (isinstance(v, str) and v):
+            out[k] = v
+    return out
+
 def slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return (s[:48] or "module").strip("-")
@@ -110,7 +120,8 @@ def ai_module(p, existing):
             "Fields: id, name, version, description, effects.",
             "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50), dock (bool), popupApps (bool), widgets (bool).",
             "Never include code, scripts, URLs other than browserHomepage, or unsafe effects.",
-            "For updates, keep the same id and bump the patch version."
+            "For updates, keep the same id and bump the patch version.",
+            "If the request cannot be done with the allowed effects, return {\"needsUpdate\": true} instead of an empty module."
         ]
     }
     for provider, key, key_id in attempts:
@@ -137,7 +148,7 @@ def fallback(p, existing):
         detail = p.get("details", "")
         if detail:
             m["description"] = (m.get("description", "") + " Update: " + detail).strip()
-            cm = re.search(r"channel\s*(\d+)\s*(?:should be labeled|labeled|label)\s+([A-Za-z0-9 _-]+)", detail, re.I)
+            cm = re.search(r"channel\s*(\d+)\s*(?:should be labeled|labeled|label|called|named)\s+([A-Za-z0-9 _-]+)", detail, re.I) or re.search(r"(?:label|name|call)\s+channel\s*(\d+)\s+([A-Za-z0-9 _-]+)", detail, re.I)
             if cm:
                 effects = dict(m.get("effects") or {})
                 labels = dict(effects.get("channelLabels") or {})
@@ -152,6 +163,9 @@ def fallback(p, existing):
     if "dock" in low: effects["dock"] = True
     if "popup" in low: effects["popupApps"] = True
     if "widget" in low: effects["widgets"] = True
+    cm = re.search(r"channel\s*(\d+)\s*(?:should be labeled|labeled|label|called|named)\s+([A-Za-z0-9 _-]+)", desc, re.I) or re.search(r"(?:label|name|call)\s+channel\s*(\d+)\s+([A-Za-z0-9 _-]+)", desc, re.I)
+    if cm:
+        effects["channelLabels"] = {cm.group(1): cm.group(2).strip()}
     return {"id": mid, "name": desc[:60] or mid, "version": "1.0.0",
             "description": desc, "effects": effects}
 
@@ -176,6 +190,7 @@ def usage_for(m):
 
 def validate(m):
     if not isinstance(m, dict): raise ValueError("module is not an object")
+    if m.get("needsUpdate"): raise NeedsUpdate("request needs a Control update")
     mid = slug(str(m.get("id", "")))
     if not mid: raise ValueError("module has no id")
     effects = m.get("effects") or {}
@@ -191,6 +206,9 @@ def validate(m):
             clean[k] = [x for x in v if isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.]+", x)]
         elif k == "channelLabels" and isinstance(v, dict):
             clean[k] = {str(kk): str(vv)[:40] for kk, vv in v.items() if str(kk).isdigit() and 1 <= int(kk) <= 50}
+    clean = _effective(clean)
+    if not clean:
+        raise NeedsUpdate("no allowed effect applies to this request")
     return {"id": mid, "name": str(m.get("name", mid))[:80],
             "version": str(m.get("version", "1.0.0"))[:20],
             "description": str(m.get("description", ""))[:500], "effects": clean}
@@ -202,8 +220,18 @@ def main():
     if mid:
         f = ROOT / "modules" / mid / "module.json"
         if f.exists(): existing = json.loads(f.read_text())
-    m = validate(ai_module(p, existing) or fallback(p, existing))
+    try:
+        m = validate(ai_module(p, existing) or fallback(p, existing))
+    except NeedsUpdate as e:
+        Path("needs-update.txt").write_text(str(e) + "\n")
+        print("NEEDS_UPDATE", e)
+        return
+    if existing and _effective(existing.get("effects")) == m["effects"]:
+        Path("needs-update.txt").write_text("the requested change does not change any module effect\n")
+        print("NEEDS_UPDATE no-change")
+        return
     if mid: m["id"] = mid
+    m["usage"] = usage_for(m)
     folder = ROOT / "modules" / m["id"]
     folder.mkdir(parents=True, exist_ok=True)
     raw = (json.dumps(m, indent=2) + "\n").encode()
@@ -218,7 +246,7 @@ def main():
             other = json.loads(mf.read_text())
         except Exception:
             continue
-        if other.get("id") and other["id"] != m["id"]:
+        if other.get("id") and other["id"] != m["id"] and _effective(other.get("effects")):
             raw = mf.read_bytes()
             mods.append({"id": other["id"],
                          "name": other.get("name", other["id"]),
@@ -230,7 +258,8 @@ def main():
                          "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/"
                                 + other["id"] + "/module.json"})
     mods.append({"id": m["id"], "name": m["name"], "version": m["version"],
-        "description": m["description"], "sha256": sha,
+        "description": m["description"], "usage": m["usage"],
+        "status": "completed", "sha256": sha,
         "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/" + m["id"] + "/module.json"})
     mods.sort(key=lambda x: x["id"])
     index_path.write_text(json.dumps({"modules": mods}, indent=2) + "\n")
