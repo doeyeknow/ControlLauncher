@@ -2,12 +2,15 @@ name: Module builder
 on:
   issues:
     types: [opened, labeled]
+concurrency:
+  group: module-builder
+  cancel-in-progress: false
 permissions:
   contents: write
   issues: write
 jobs:
   build:
-    if: contains(github.event.issue.labels.*.name, 'module-request') || contains(github.event.issue.labels.*.name, 'module-update')
+    if: contains(github.event.issue.labels.*.name, 'module-approved')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
