@@ -19,6 +19,14 @@
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-all-apps-to-open-in-popup-view-and-have-a/module.json"
     },
     {
+      "id": "i-want-apps-to-open-in-popup-mode-and-a-dock-for",
+      "name": "I want apps to open in popup mode, and a dock for running ap",
+      "version": "1.0.0",
+      "description": "I want apps to open in popup mode, and a dock for running apps similar to osx\n\nRequested from Control on Android. Please build this as a reviewed module if it is a data change, or a signed app update if it needs code.",
+      "sha256": "f22b386b2e6c2be733db7568233414ad7273a755f544bae50a89aa180e531971",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/i-want-apps-to-open-in-popup-mode-and-a-dock-for/module.json"
+    },
+    {
       "id": "i-want-to-be-able-to-add-android-widgets-to-the",
       "name": "I want to be able to add android widgets to the home screen",
       "version": "1.0.0",

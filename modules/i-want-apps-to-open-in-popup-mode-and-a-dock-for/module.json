@@ -1,0 +1,10 @@
+{
+  "id": "i-want-apps-to-open-in-popup-mode-and-a-dock-for",
+  "name": "I want apps to open in popup mode, and a dock for running ap",
+  "version": "1.0.0",
+  "description": "I want apps to open in popup mode, and a dock for running apps similar to osx\n\nRequested from Control on Android. Please build this as a reviewed module if it is a data change, or a signed app update if it needs code.",
+  "effects": {
+    "dock": true,
+    "popupApps": true
+  }
+}
