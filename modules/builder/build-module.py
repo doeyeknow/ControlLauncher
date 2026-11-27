@@ -74,6 +74,23 @@ def fallback(p, existing):
     return {"id": mid, "name": desc[:60] or mid, "version": "1.0.0",
             "description": desc, "effects": effects}
 
+def usage_for(m):
+    effects = m.get("effects") or {}
+    parts = []
+    if effects.get("dock"):
+        parts.append("Install it and a dock appears at the bottom of the screen. Tap an icon to open or minimize the app; long-press to close it.")
+    if effects.get("popupApps"):
+        parts.append("Apps opened from the dock appear in a popup window.")
+    if effects.get("channelLabels"):
+        parts.append("Install it and the walkie channels get their labels.")
+    if effects.get("mutedApps"):
+        parts.append("Install it and the listed apps are muted.")
+    if effects.get("browserHomepage"):
+        parts.append("Install it and the browser homepage changes.")
+    if not parts:
+        parts.append("Install it from Modules; it takes effect right away.")
+    return " ".join(parts)
+
 def validate(m):
     if not isinstance(m, dict): raise ValueError("module is not an object")
     mid = slug(str(m.get("id", "")))
