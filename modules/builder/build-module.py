@@ -3,7 +3,7 @@ import hashlib, json, os, re, sys, urllib.request
 from pathlib import Path
 
 ROOT = Path.cwd()
-ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels"}
+ALLOWED_EFFECTS = {"browserHomepage", "mutedApps", "channelLabels", "dock", "popupApps"}
 
 def slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -57,11 +57,22 @@ def fallback(p, existing):
         detail = p.get("details", "")
         if detail:
             m["description"] = (m.get("description", "") + " Update: " + detail).strip()
+            cm = re.search(r"channel\s*(\d+)\s*(?:should be labeled|labeled|label)\s+([A-Za-z0-9 _-]+)", detail, re.I)
+            if cm:
+                effects = dict(m.get("effects") or {})
+                labels = dict(effects.get("channelLabels") or {})
+                labels[cm.group(1)] = cm.group(2).strip()
+                effects["channelLabels"] = labels
+                m["effects"] = effects
         return m
     desc = p.get("description", "Requested module")
     mid = slug(desc)
+    effects = {}
+    low = desc.lower()
+    if "dock" in low: effects["dock"] = True
+    if "popup" in low: effects["popupApps"] = True
     return {"id": mid, "name": desc[:60] or mid, "version": "1.0.0",
-            "description": desc, "effects": {}}
+            "description": desc, "effects": effects}
 
 def validate(m):
     if not isinstance(m, dict): raise ValueError("module is not an object")
@@ -72,7 +83,9 @@ def validate(m):
     clean = {}
     for k, v in effects.items():
         if k not in ALLOWED_EFFECTS: continue
-        if k == "browserHomepage" and isinstance(v, str) and v.startswith("https://"):
+        if k in ("dock", "popupApps") and isinstance(v, bool):
+            clean[k] = v
+        elif k == "browserHomepage" and isinstance(v, str) and v.startswith("https://"):
             clean[k] = v
         elif k == "mutedApps" and isinstance(v, list):
             clean[k] = [x for x in v if isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.]+", x)]
