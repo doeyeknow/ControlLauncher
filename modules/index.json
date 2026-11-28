@@ -29,6 +29,17 @@
       "status": "completed",
       "sha256": "1c910684f4d40166d2505ed6f636a340b9bab84733cb2eb0c921bb53294f15f5",
       "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/walkie-labels/module.json"
+    },
+    {
+      "id": "home-greeting",
+      "name": "Home greeting",
+      "version": "1.0.0",
+      "description": "Proof code module: a Settings switch toggles a greeting line on the home page.",
+      "usage": "Install it from Modules; it takes effect right away. Remove it any time.",
+      "status": "completed",
+      "type": "code",
+      "sha256": "1d5c93b606fc092154b408166d8c995dc768a19fdc8107c1cdce2b0dc406c928",
+      "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/home-greeting/module.json"
     }
   ]
 }
