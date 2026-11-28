@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import hashlib, json, os, re, sys, urllib.request
+import hashlib, json, os, re, subprocess, sys, tempfile, urllib.request
 from pathlib import Path
 
 ROOT = Path.cwd()
@@ -69,7 +69,7 @@ def _call_provider(provider, key, model, prompt):
     if provider == "anthropic":
         data = json.dumps({
             "model": model, "max_tokens": 1024,
-            "system": "You build safe data-only Control Launcher modules. Return JSON only.",
+            "system": "You build Control Launcher modules. Return JSON only.",
             "messages": [{"role": "user", "content": json.dumps(prompt)}]
         }).encode()
         req = urllib.request.Request(cfg["base"] + "/messages", data=data,
@@ -82,7 +82,7 @@ def _call_provider(provider, key, model, prompt):
     data = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": "You build safe data-only Control Launcher modules. Return JSON only."},
+            {"role": "system", "content": "You build Control Launcher modules. Return JSON only."},
             {"role": "user", "content": json.dumps(prompt)}
         ],
         "response_format": {"type": "json_object"}
@@ -119,11 +119,13 @@ def ai_module(p, existing):
         "existingModule": existing,
         "rules": [
             "Return only JSON for one Control module.",
-            "Fields: id, name, version, description, effects.",
+            "Data module fields: id, name, version, description, effects.",
             "effects may only contain browserHomepage (https URL), mutedApps (package names), channelLabels (keys 1-50), dock (bool), popupApps (bool), widgets (bool).",
-            "Never include code, scripts, URLs other than browserHomepage, or unsafe effects.",
+            "Code module alternative: return {\"codeModule\": {\"id\", \"name\", \"version\", \"description\", \"entryClass\", \"capabilities\", \"source\"}} where source is one Java class implementing app.control.launcher.moduleapi.ControlModule against ModuleApi only (registerSettingsSwitch, registerSettingsRow, addHomeSection, getPref/putPref/getBool/putBool, toast, openUrl, themeColor, refreshHome). capabilities is a subset of settings, home, prefs, toast, browser, theme.",
+            "Code module source may import only app.control.launcher.moduleapi.*, android.content.Context, android.view.View, android.view.ViewGroup, android.widget.TextView, android.widget.LinearLayout, android.widget.Button, and java.util.*. No reflection, class loaders, files, network, intents, or system services.",
+            "Never include scripts, URLs other than browserHomepage, or unsafe effects.",
             "For updates, keep the same id and bump the patch version.",
-            "If the request cannot be done with the allowed effects, return {\"needsUpdate\": true} instead of an empty module."
+            "If the request cannot be done with the allowed effects or the ModuleApi surface, return {\"needsUpdate\": true} instead of an empty module."
         ]
     }
     for provider, key, key_id in attempts:
@@ -215,6 +217,103 @@ def validate(m):
             "version": str(m.get("version", "1.0.0"))[:20],
             "description": str(m.get("description", ""))[:500], "effects": clean}
 
+CODE_CAPABILITIES = {"settings", "home", "prefs", "toast", "browser", "theme"}
+CODE_FORBIDDEN = ["reflect", "ClassLoader", "DexClassLoader", "loadClass", "forName",
+    "Runtime.", "ProcessBuilder", "java.io", "java.net", "android.app", "android.os",
+    "Intent", "getSystemService", "SharedPreferences", "ContentResolver", "Settings.",
+    "PackageManager", "Thread", "System.exit", "native "]
+CODE_ALLOWED_IMPORTS = ("app.control.launcher.moduleapi.", "android.content.Context",
+    "android.view.View", "android.view.ViewGroup", "android.widget.TextView",
+    "android.widget.LinearLayout", "android.widget.Button", "java.util.")
+
+def _builder_dir():
+    return Path(__file__).resolve().parent
+
+def _find_d8():
+    env = os.environ.get("D8", "")
+    if env: return env.split()
+    home = os.environ.get("ANDROID_HOME", "")
+    if home:
+        hits = sorted(Path(home).glob("build-tools/*/d8"))
+        if hits: return [str(hits[-1])]
+    r8 = Path.home() / "workspace/native-build/r8/r8-8.7.18.jar"
+    if r8.exists(): return ["java", "-cp", str(r8), "com.android.tools.r8.D8"]
+    return None
+
+def _android_lib():
+    env = os.environ.get("ANDROID_JAR", "")
+    if env and Path(env).exists(): return env
+    home = os.environ.get("ANDROID_HOME", "")
+    if home:
+        hits = sorted(Path(home).glob("platforms/*/android.jar"))
+        if hits: return str(hits[-1])
+    return str(_builder_dir() / "android-stubs.jar")
+
+def build_code_module(cm):
+    """Compile + dex + sign one AI code module. Returns
+    (manifest_dict, dex_bytes). Raises NeedsUpdate for
+    anything outside the ModuleApi surface; nothing
+    publishes unless the source compiles and signs."""
+    if not isinstance(cm, dict): raise NeedsUpdate("code module is not an object")
+    mid = slug(str(cm.get("id", "")))
+    entry = str(cm.get("entryClass", ""))
+    source = str(cm.get("source", ""))
+    caps = [c for c in (cm.get("capabilities") or []) if c in CODE_CAPABILITIES]
+    if not mid or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)+", entry):
+        raise NeedsUpdate("code module has no valid entry class")
+    if "implements ControlModule" not in source and "implements app.control.launcher.moduleapi.ControlModule" not in source:
+        raise NeedsUpdate("code module does not implement ControlModule")
+    for bad in CODE_FORBIDDEN:
+        if bad in source:
+            raise NeedsUpdate("code module needs API surface that does not exist: " + bad)
+    for imp in re.findall(r"import\s+([\w.]+);", source):
+        if not imp.startswith(CODE_ALLOWED_IMPORTS):
+            raise NeedsUpdate("code module import outside the API surface: " + imp)
+    api_jar = _builder_dir() / "control-module-api.jar"
+    if not api_jar.exists(): raise NeedsUpdate("module API jar is missing")
+    d8 = _find_d8()
+    if not d8: raise NeedsUpdate("dex tooling is not available")
+    pkg = entry.rsplit(".", 1)[0]
+    cls = entry.rsplit(".", 1)[1]
+    with tempfile.TemporaryDirectory() as td:
+        src_dir = Path(td) / "src" / Path(*pkg.split("."))
+        src_dir.mkdir(parents=True)
+        (src_dir / (cls + ".java")).write_text(source)
+        classes = Path(td) / "classes"; classes.mkdir()
+        lib = _android_lib()
+        r = subprocess.run(["javac", "-encoding", "UTF-8", "--release", "17",
+            "-cp", str(api_jar) + os.pathsep + lib, "-d", str(classes),
+            str(src_dir / (cls + ".java"))], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise NeedsUpdate("code module does not compile against the ModuleApi")
+        dex_dir = Path(td) / "dex"; dex_dir.mkdir()
+        class_files = [str(p) for p in classes.rglob("*.class")]
+        r = subprocess.run(d8 + ["--min-api", "26", "--lib", lib,
+            "--output", str(dex_dir)] + class_files, capture_output=True, text=True)
+        dex_file = dex_dir / "classes.dex"
+        if r.returncode != 0 or not dex_file.exists():
+            raise NeedsUpdate("code module could not be dexed")
+        dex = dex_file.read_bytes()
+    version = str(cm.get("version", "1.0.0"))[:20]
+    dex_sha = hashlib.sha256(dex).hexdigest()
+    canonical = "control-code-module-v1\n%s\n%s\n%s\n1\n%s\n%s" % (
+        mid, version, entry, dex_sha, ",".join(sorted(caps)))
+    seed_hex = os.environ.get("CONTROL_MODULE_SIGNING_KEY", "").strip()
+    if not seed_hex:
+        raise NeedsUpdate("code module signing is not configured")
+    try:
+        import nacl.signing
+        key = nacl.signing.SigningKey(bytes.fromhex(seed_hex))
+        sig = key.sign(canonical.encode()).signature.hex()
+    except Exception:
+        raise NeedsUpdate("code module signing is not configured")
+    manifest = {"id": mid, "name": str(cm.get("name", mid))[:80],
+        "version": version, "description": str(cm.get("description", ""))[:500],
+        "type": "code", "entryClass": entry, "apiVersion": 1,
+        "capabilities": sorted(caps), "dexSha256": dex_sha, "signature": sig,
+        "usage": "Install it from Modules; it takes effect right away. Remove it any time."}
+    return manifest, dex
+
 def main():
     p = payload()
     mid = slug(str(p.get("moduleId", ""))) if p.get("type") == "update" else ""
@@ -222,8 +321,26 @@ def main():
     if mid:
         f = ROOT / "modules" / mid / "module.json"
         if f.exists(): existing = json.loads(f.read_text())
+    ai_result = ai_module(p, existing)
+    if isinstance(ai_result, dict) and ai_result.get("codeModule"):
+        try:
+            manifest, dex = build_code_module(ai_result["codeModule"])
+        except NeedsUpdate as e:
+            Path("needs-update.txt").write_text(str(e) + "\n")
+            print("NEEDS_UPDATE", e)
+            return
+        if mid: manifest["id"] = mid
+        folder = ROOT / "modules" / manifest["id"]
+        folder.mkdir(parents=True, exist_ok=True)
+        raw = (json.dumps(manifest, indent=2) + "\n").encode()
+        (folder / "module.json").write_bytes(raw)
+        (folder / "classes.dex").write_bytes(dex)
+        rebuild_index(manifest, raw)
+        print("built code module", manifest["id"], manifest["version"],
+              hashlib.sha256(raw).hexdigest())
+        return
     try:
-        m = validate(ai_module(p, existing) or fallback(p, existing))
+        m = validate(ai_result or fallback(p, existing))
     except NeedsUpdate as e:
         Path("needs-update.txt").write_text(str(e) + "\n")
         print("NEEDS_UPDATE", e)
@@ -239,33 +356,41 @@ def main():
     raw = (json.dumps(m, indent=2) + "\n").encode()
     (folder / "module.json").write_bytes(raw)
     sha = hashlib.sha256(raw).hexdigest()
-    index_path = ROOT / "modules" / "index.json"
+    rebuild_index(m, raw)
+    print("built", m["id"], m["version"], sha)
+
+def rebuild_index(m, raw):
     # Rebuild the index from every module on disk so an entry
-    # can never be lost by a racing or partial run.
+    # can never be lost by a racing or partial run. Code
+    # modules count by type; data modules by effective effects.
     mods = []
     for mf in sorted((ROOT / "modules").glob("*/module.json")):
         try:
             other = json.loads(mf.read_text())
         except Exception:
             continue
-        if other.get("id") and other["id"] != m["id"] and _effective(other.get("effects")):
-            raw = mf.read_bytes()
+        if other.get("id") and other["id"] != m["id"] and (
+                other.get("type") == "code" or _effective(other.get("effects"))):
+            oraw = mf.read_bytes()
             mods.append({"id": other["id"],
                          "name": other.get("name", other["id"]),
                          "version": other.get("version", ""),
                          "description": other.get("description", ""),
                          "usage": other.get("usage", ""),
                          "status": "completed",
-                         "sha256": hashlib.sha256(raw).hexdigest(),
+                         "type": "code" if other.get("type") == "code" else "data",
+                         "sha256": hashlib.sha256(oraw).hexdigest(),
                          "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/"
                                 + other["id"] + "/module.json"})
     mods.append({"id": m["id"], "name": m["name"], "version": m["version"],
-        "description": m["description"], "usage": m["usage"],
-        "status": "completed", "sha256": sha,
+        "description": m["description"], "usage": m.get("usage", ""),
+        "status": "completed",
+        "type": "code" if m.get("type") == "code" else "data",
+        "sha256": hashlib.sha256(raw).hexdigest(),
         "url": "https://raw.githubusercontent.com/doeyeknow/ControlLauncher/main/modules/" + m["id"] + "/module.json"})
     mods.sort(key=lambda x: x["id"])
-    index_path.write_text(json.dumps({"modules": mods}, indent=2) + "\n")
-    print("built", m["id"], m["version"], sha)
+    (ROOT / "modules" / "index.json").write_text(
+        json.dumps({"modules": mods}, indent=2) + "\n")
 
 if __name__ == "__main__":
     main()
