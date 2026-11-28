@@ -38,7 +38,10 @@ jobs:
           GOOGLE_API_KEYS: ${{ secrets.GOOGLE_API_KEYS }}
           AIKEYS_URL: https://relay.eyeknow.app
           AIKEYS_BUILDER_SECRET: ${{ secrets.AIKEYS_BUILDER_SECRET }}
-        run: python3 modules/builder/build-module.py
+          CONTROL_MODULE_SIGNING_KEY: ${{ secrets.CONTROL_MODULE_SIGNING_KEY }}
+        run: |
+          pip install --quiet pynacl
+          python3 modules/builder/build-module.py
       - name: Commit module
         if: hashFiles('needs-update.txt') == ''
         run: |
