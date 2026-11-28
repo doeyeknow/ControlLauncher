@@ -1,0 +1,18 @@
+{
+  "id": "home-greeting",
+  "name": "Home greeting",
+  "version": "1.0.0",
+  "description": "Proof code module: a Settings switch toggles a greeting line on the home page.",
+  "type": "code",
+  "entryClass": "modules.greeting.GreetingModule",
+  "apiVersion": 1,
+  "capabilities": [
+    "home",
+    "prefs",
+    "settings",
+    "theme"
+  ],
+  "dexSha256": "6f458dbedcf0213018e7ba19842e99ed3ed36b66047c0736f5f893035e851adf",
+  "signature": "5e78a87b6d53af05514f56bcebf53e87589aba75bba90f4e538e325823f3a681c292a6e43e1883fdc9e8649a6cb8da4de03928a3cc584e7a698e7b930c6edf0a",
+  "usage": "Install it from Modules; it takes effect right away. Remove it any time."
+}
